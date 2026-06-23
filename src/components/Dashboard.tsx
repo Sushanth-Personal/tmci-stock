@@ -23,9 +23,17 @@ export default function Dashboard({ products, sales, purchases }: Props) {
   const [from, setFrom] = useState(monthStart);
   const [to, setTo] = useState(todayStr);
   const [location, setLocation] = useState("both");
+  const [isMobile, setIsMobile] = useState(false);
 
   const [stock, setStock] = useState<any[]>([]);
   const [stockLoading, setStockLoading] = useState(true);
+
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth <= 720);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
 
   useEffect(() => {
     fetch("/api/stock")
@@ -115,34 +123,21 @@ export default function Dashboard({ products, sales, purchases }: Props) {
     return { salesVal, margin, purchasesVal, topMovers };
   }, [sales, purchases, from, to, location]);
 
-  const Card = ({ children, style }: any) => (
-    <div
-      style={{
-        background: "var(--bg-card)",
-        border: "1px solid var(--border)",
-        borderRadius: 10,
-        padding: "12px 14px",
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
+  const card: React.CSSProperties = {
+    background: "var(--bg-card)",
+    border: "1px solid var(--border)",
+    borderRadius: 10,
+    padding: "12px 14px",
+  };
 
-  const SectionLabel = ({ children }: any) => (
-    <div
-      style={{
-        fontSize: 10,
-        fontWeight: 500,
-        color: "var(--text-muted)",
-        textTransform: "uppercase",
-        letterSpacing: "0.05em",
-        marginBottom: 10,
-      }}
-    >
-      {children}
-    </div>
-  );
+  const sectionLabel: React.CSSProperties = {
+    fontSize: 10,
+    fontWeight: 500,
+    color: "var(--text-muted)",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    marginBottom: 10,
+  };
 
   const Metric = ({ label, value, sub, color }: any) => (
     <div
@@ -150,6 +145,7 @@ export default function Dashboard({ products, sales, purchases }: Props) {
         background: "var(--bg-input)",
         borderRadius: 8,
         padding: "10px 12px",
+        minWidth: 0,
       }}
     >
       <div
@@ -158,7 +154,12 @@ export default function Dashboard({ products, sales, purchases }: Props) {
         {label}
       </div>
       <div
-        style={{ fontSize: 20, fontWeight: 600, color: color || "var(--text)" }}
+        style={{
+          fontSize: 18,
+          fontWeight: 600,
+          color: color || "var(--text)",
+          wordBreak: "break-word",
+        }}
       >
         {value}
       </div>
@@ -171,18 +172,75 @@ export default function Dashboard({ products, sales, purchases }: Props) {
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Period filter */}
-      <Card>
-        <SectionLabel>Period & filters</SectionLabel>
-        <div className="date-filter-row">
-          <label>From</label>
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        width: "100%",
+        minWidth: 0,
+      }}
+    >
+      <style>{`
+        .dash-filter-row {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin-bottom: 12px;
+        }
+        .dash-filter-row input[type="date"],
+        .dash-filter-row select {
+          width: 100%;
+        }
+        .dash-filter-label {
+          font-size: 11px;
+          color: var(--text-dim);
+          margin-bottom: 0;
+        }
+        .dash-metric-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px;
+        }
+        .dash-loc-grid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 12px;
+        }
+        .dash-table-wrap {
+          overflow-x: auto;
+          border: 1px solid var(--border);
+          border-radius: 8px;
+        }
+        .dash-table-wrap table { min-width: 280px; }
+        @media (min-width: 721px) {
+          .dash-filter-row {
+            flex-direction: row;
+            align-items: center;
+            flex-wrap: wrap;
+          }
+          .dash-filter-row input[type="date"] { width: 140px; }
+          .dash-filter-row select { width: 160px; }
+          .dash-metric-grid {
+            grid-template-columns: repeat(4, 1fr);
+          }
+          .dash-loc-grid {
+            grid-template-columns: 1fr 1fr;
+          }
+        }
+      `}</style>
+
+      {/* Period filter card */}
+      <div style={card}>
+        <div style={sectionLabel}>Period &amp; filters</div>
+        <div className="dash-filter-row">
+          <span className="dash-filter-label">From</span>
           <input
             type="date"
             value={from}
             onChange={(e) => setFrom(e.target.value)}
           />
-          <label>To</label>
+          <span className="dash-filter-label">To</span>
           <input
             type="date"
             value={to}
@@ -191,14 +249,13 @@ export default function Dashboard({ products, sales, purchases }: Props) {
           <select
             value={location}
             onChange={(e) => setLocation(e.target.value)}
-            style={{ minWidth: 140 }}
           >
             <option value="both">Both locations</option>
             <option value="Kochi">Kochi only</option>
             <option value="Bangalore">Bangalore only</option>
           </select>
         </div>
-        <div className="metric-grid">
+        <div className="dash-metric-grid">
           <Metric
             label="Stock value (ex-GST)"
             value={
@@ -227,17 +284,18 @@ export default function Dashboard({ products, sales, purchases }: Props) {
             color="var(--accent-amber)"
           />
         </div>
-      </Card>
+      </div>
 
-      <div className="loc-grid">
-        <Card>
-          <SectionLabel>Stock by location</SectionLabel>
+      {/* Stock by location + Top movers */}
+      <div className="dash-loc-grid">
+        <div style={card}>
+          <div style={sectionLabel}>Stock by location</div>
           {stockLoading ? (
             <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
               Loading…
             </div>
           ) : (
-            <div className="table-scroll">
+            <div className="dash-table-wrap">
               <table>
                 <thead>
                   <tr>
@@ -270,20 +328,21 @@ export default function Dashboard({ products, sales, purchases }: Props) {
               </table>
             </div>
           )}
-        </Card>
-        <Card>
-          <SectionLabel>Top movers (period)</SectionLabel>
+        </div>
+
+        <div style={card}>
+          <div style={sectionLabel}>Top movers (period)</div>
           {stats.topMovers.length === 0 ? (
             <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
               No sales in this period.
             </div>
           ) : (
-            <div className="table-scroll">
+            <div className="dash-table-wrap">
               <table>
                 <thead>
                   <tr>
                     <th>Model</th>
-                    <th>Units sold</th>
+                    <th>Units</th>
                     <th>Value</th>
                   </tr>
                 </thead>
@@ -299,22 +358,23 @@ export default function Dashboard({ products, sales, purchases }: Props) {
               </table>
             </div>
           )}
-        </Card>
+        </div>
       </div>
 
+      {/* Low stock alert */}
       {!stockLoading && lowStockRows.length > 0 && (
-        <Card>
-          <SectionLabel>⚠ Low / Out of stock</SectionLabel>
-          <div className="table-scroll">
+        <div style={card}>
+          <div style={sectionLabel}>⚠ Low / Out of stock</div>
+          <div className="dash-table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Model</th>
                   <th>Category</th>
                   <th>Kochi</th>
-                  <th>Bangalore</th>
+                  <th>Blore</th>
                   <th>Total</th>
-                  <th>Cost Price</th>
+                  <th>Cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -341,7 +401,7 @@ export default function Dashboard({ products, sales, purchases }: Props) {
               </tbody>
             </table>
           </div>
-        </Card>
+        </div>
       )}
     </div>
   );
