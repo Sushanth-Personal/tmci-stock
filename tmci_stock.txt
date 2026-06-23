@@ -1,6 +1,6 @@
 ========================================
   TMCI CODEBASE DUMP
-  Generated: Mon Jun 22 16:12:52 IST 2026
+  Generated: Tue Jun 23 15:19:12 IST 2026
   Root: /Users/sushanthp/TMCI/Stock Website/tmci-stock-nextjs
 ========================================
 
@@ -67,7 +67,7 @@ FILE: ./next-env.d.ts
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 /// <reference types="next" />
 /// <reference types="next/image-types/global" />
-import "./.next/dev/types/routes.d.ts";
+import "./.next/types/routes.d.ts";
 
 // NOTE: This file should not be edited
 // see https://nextjs.org/docs/app/api-reference/config/typescript for more information.
@@ -321,27 +321,57 @@ export async function GET() {
 }
 
 // POST: record a purchase.
-// - Appends a "Purchase" row to Transactions (Cost Price column left blank;
-//   it's only meaningful for Sale rows).
-// - Creates a new lot in Fluke Lots at this batch's purchase price.
-// - Updates the Stock rollup (Received += qty, Current Stock += qty).
+// Frontend (RecordPurchase.tsx) sends:
+//   date, invoiceDate, model, location, qtyPurchased, unitListPrice,
+//   baseDiscount, addDiscount, customFinalPrice, courierCharges, supplier
+// Older callers may send qty / unitPurchasePrice / vendor directly — both forms accepted.
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const {
       date,
+      invoiceDate,
       model,
       location,
-      qty,
-      unitPurchasePrice,
-      vendor,
+      qtyPurchased,
+      qty, // legacy / direct callers
+      unitListPrice,
+      baseDiscount,
+      addDiscount,
+      customFinalPrice,
+      unitPurchasePrice, // legacy / direct callers
+      courierCharges,
+      courier, // alternative field name
+      supplier,
+      vendor, // legacy / direct callers
       poOrInvoice,
       status,
     } = body;
 
-    if (!model || !location || !qty || !unitPurchasePrice) {
+    const resolvedQty = Number(qtyPurchased ?? qty ?? 0);
+
+    // Derive the effective unit purchase price:
+    // list × (1 − base%) × (1 − add%), then override with customFinalPrice if set.
+    // Falls back to a directly-supplied unitPurchasePrice for legacy callers.
+    const afterBase =
+      Number(unitListPrice ?? 0) * (1 - Number(baseDiscount ?? 0) / 100);
+    const afterAdd = afterBase * (1 - Number(addDiscount ?? 0) / 100);
+    const resolvedUnitPrice = customFinalPrice
+      ? Number(customFinalPrice)
+      : unitPurchasePrice
+        ? Number(unitPurchasePrice)
+        : afterAdd;
+
+    // Effective cost includes courier spread across this line's qty
+    const resolvedCourier = Number(courierCharges ?? courier ?? 0);
+    const courierPerUnit = resolvedQty > 0 ? resolvedCourier / resolvedQty : 0;
+    const effectiveCostPerUnit = resolvedUnitPrice + courierPerUnit;
+
+    const resolvedVendor = supplier ?? vendor ?? "";
+
+    if (!model || !location || !resolvedQty || !resolvedUnitPrice) {
       return NextResponse.json(
-        { error: "model, location, qty, and unitPurchasePrice are required" },
+        { error: "model, location, qty, and unit price are required" },
         { status: 400 },
       );
     }
@@ -356,11 +386,13 @@ export async function POST(req: Request) {
     }
 
     const txnDate = date ?? new Date().toISOString().split("T")[0];
-    const total = Number(qty) * Number(unitPurchasePrice);
+    const total = resolvedQty * resolvedUnitPrice + resolvedCourier;
     const txnId = await getNextTxnId();
 
     // 1. Log the transaction
-    await appendRows(SHEETS.TRANSACTIONS, "A:M", [
+    // Col M (index 12) = Cost Price — not applicable to purchases, left blank.
+    // Col N (index 13) = Invoice Date — stored for reference.
+    await appendRows(SHEETS.TRANSACTIONS, "A:N", [
       [
         txnId,
         txnDate,
@@ -368,25 +400,26 @@ export async function POST(req: Request) {
         product.itemCode,
         model,
         location,
-        Number(qty),
-        Number(unitPurchasePrice),
+        resolvedQty,
+        resolvedUnitPrice,
         total,
-        vendor ?? "",
+        resolvedVendor,
         poOrInvoice ?? "",
         status ?? "Received",
         "", // Cost Price — not applicable to purchases
+        invoiceDate ?? "", // Invoice Date
       ],
     ]);
 
-    // 2. Create the FIFO lot
+    // 2. Create the FIFO lot (cost basis = unit purchase price, no courier)
     const lotId = await createLot({
       date: txnDate,
       itemCode: product.itemCode,
       model,
       location,
-      qty: Number(qty),
-      unitPurchasePrice: Number(unitPurchasePrice),
-      vendor: vendor ?? "",
+      qty: resolvedQty,
+      unitPurchasePrice: resolvedUnitPrice,
+      vendor: resolvedVendor,
       poOrInvoice: poOrInvoice ?? "",
     });
 
@@ -395,18 +428,23 @@ export async function POST(req: Request) {
     const existing = stock.find(
       (s) => s.itemCode === product.itemCode && s.location === location,
     );
-    const newCurrentStock = (existing?.currentStock ?? 0) + Number(qty);
+    const newCurrentStock = (existing?.currentStock ?? 0) + resolvedQty;
     await syncStockRow(
       product.itemCode,
       model,
       product.description,
       location,
-      Number(qty), // deltaReceived
+      resolvedQty, // deltaReceived
       0, // deltaSold
       newCurrentStock,
     );
 
-    return NextResponse.json({ success: true, txnId, lotId });
+    return NextResponse.json({
+      success: true,
+      txnId,
+      lotId,
+      effectiveCostPerUnit,
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
@@ -2665,12 +2703,7 @@ interface BatchLine {
   total: number;
 }
 
-// Defined at module scope (not inside RecordPurchase) so these are stable
-// function references across renders. Defining a component inline inside
-// another component's body recreates it on every render, which makes React
-// treat it as a brand-new component type and remount its DOM — including
-// any <input> inside it — wiping focus on every keystroke. This was the
-// actual cause of the "every digit kicks me out of the field" bug.
+// Defined at module scope so these are stable function references across renders.
 const FG = ({ label, children, full, note }: any) => (
   <div style={{ gridColumn: full ? "1/-1" : undefined }}>
     <label>
@@ -2706,12 +2739,7 @@ const PriceRow = ({ label, value, final, color }: any) => (
 );
 
 // ─────────────────────────────────────────────────────────────────────────
-// Searchable model combobox.
-// Native <select> only supports first-letter jump-to-match, not substring
-// filtering — so typing "TL" doesn't narrow down to TL75 / TL175 / TC01B.
-// This is a lightweight text-input + filtered-list replacement, no extra
-// dependencies. Filters on model name, category, and item code, case-
-// insensitive, matching anywhere in the string (not just prefix).
+// Searchable model combobox
 // ─────────────────────────────────────────────────────────────────────────
 function ModelCombobox({
   products,
@@ -2722,15 +2750,13 @@ function ModelCombobox({
   products: any[];
   value: string;
   onSelect: (model: string) => void;
-  inputRef: React.RefObject<HTMLInputElement>;
+  inputRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const [query, setQuery] = useState(value);
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
 
-  // Keep the visible text in sync when the parent resets `value` (e.g.
-  // after a save clears the model field back to "").
   useEffect(() => {
     setQuery(value);
   }, [value]);
@@ -2750,7 +2776,6 @@ function ModelCombobox({
     setHighlight(0);
   }, [query, open]);
 
-  // Close dropdown on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
@@ -2797,8 +2822,6 @@ function ModelCombobox({
         onChange={(e) => {
           setQuery(e.target.value);
           setOpen(true);
-          // Typing freely invalidates the previous confirmed selection
-          // until something is actually chosen from the list again.
           if (e.target.value === "") onSelect("");
         }}
         onFocus={() => setOpen(true)}
@@ -2882,24 +2905,20 @@ function ModelCombobox({
 export default function RecordPurchase({ products, onSuccess }: Props) {
   const today = new Date().toISOString().split("T")[0];
 
-  // ── Batch mode: keeps PO-level fields (date, location, supplier,
-  // discounts, courier) sticky across saves so you don't retype them
-  // for every line item on the same PO. Defaults ON since that's the
-  // common case (entering a multi-line Fluke PO).
   const [batchMode, setBatchMode] = useState(true);
   const [batchLines, setBatchLines] = useState<BatchLine[]>([]);
 
   const [model, setModel] = useState("");
+  // Purchase date = when goods were received / the PO date
   const [date, setDate] = useState(today);
+  // Invoice date = supplier's invoice date (may differ from receipt date)
+  const [invoiceDate, setInvoiceDate] = useState("");
   const [location, setLocation] = useState("Kochi");
-  const [qty, setQty] = useState(10);
+  const [qty, setQty] = useState<number | "">("");
   const [listPrice, setListPrice] = useState<number | "">("");
   const [baseDiscount, setBaseDiscount] = useState<number | "">(30);
   const [addDiscount, setAddDiscount] = useState<number | "">(0);
   const [customFinal, setCustomFinal] = useState<number | "">("");
-  // NEW: lets you type the flat total the vendor billed for this line
-  // (e.g. "₹18,000 for 10 units") instead of mentally dividing by qty.
-  // Kept in sync with customFinal in both directions.
   const [customTotalPrice, setCustomTotalPrice] = useState<number | "">("");
   const [courier, setCourier] = useState<number | "">(0);
   const [supplier, setSupplier] = useState("");
@@ -2921,21 +2940,11 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
     const ad = +(addDiscount || 0) / 100;
     const afterBase = lp * (1 - bd);
     const afterAdd = afterBase * (1 - ad);
+    const resolvedQty = +(qty || 0);
     const unitPrice = customFinal !== "" ? +customFinal : afterAdd;
-    const courierPer = +(courier || 0) / (qty || 1);
+    const courierPer = resolvedQty > 0 ? +(courier || 0) / resolvedQty : 0;
     const effectiveCost = unitPrice + courierPer;
-    const totalVal = qty * unitPrice + +(courier || 0);
-    // When a custom unit price is typed, work out what additional discount
-    // (on top of the general discount already applied) that price actually
-    // represents — e.g. list ₹3300, 30% general → ₹2310; if you type a
-    // custom price of ₹1980, that's a further ~14.3% off ₹2310, not "0%
-    // additional discount" as the raw field would suggest.
-    // Additional discount is measured as a % of the ORIGINAL LIST PRICE,
-    // not the post-base-discount price — so discounts stack additively
-    // (30% base + 9.76% additional = ~39.76% total off list), matching
-    // how vendors actually quote stacked discounts. Using afterBase as
-    // the denominator instead would compound the two discounts together
-    // and report a misleadingly larger "additional discount" figure.
+    const totalVal = resolvedQty * unitPrice + +(courier || 0);
     const impliedAddDiscountPct =
       customFinal !== "" && lp > 0
         ? ((afterBase - +customFinal) / lp) * 100
@@ -2951,38 +2960,27 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
     };
   }, [listPrice, baseDiscount, addDiscount, customFinal, courier, qty]);
 
-  // If qty changes after a flat total has already been typed, keep the
-  // total fixed and recompute the per-unit price from it (rather than
-  // silently leaving a stale per-unit figure tied to the old qty).
   useEffect(() => {
-    if (customTotalPrice !== "" && qty > 0) {
-      setCustomFinal(+(+customTotalPrice / qty).toFixed(2));
+    if (customTotalPrice !== "" && qty !== "" && +qty > 0) {
+      setCustomFinal(+(+customTotalPrice / +qty).toFixed(2));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [qty]);
 
-  // Fields that reset after each save in batch mode (line-item specific).
-  // date / location / supplier / baseDiscount / addDiscount / courier are
-  // intentionally left untouched — they're the PO-level fields you'd
-  // otherwise have to retype for every line.
   const clearLineFields = () => {
     setModel("");
-    setQty(10);
+    setQty("");
     setListPrice("");
     setCustomFinal("");
     setCustomTotalPrice("");
     setError("");
   };
 
-  // Called when a product is chosen from the combobox (or cleared).
   const handleModelSelect = (newModel: string) => {
     setModel(newModel);
     const p = products.find((x) => x.model === newModel);
     if (p) {
       setListPrice(p.listPrice || "");
-      // Only autofill discounts from the product if this is the
-      // first line of the batch — otherwise the discount you've
-      // already set for this PO takes priority (sticky).
       if (!batchMode || batchLines.length === 0) {
         setBaseDiscount(p.baseDiscount ? p.baseDiscount * 100 : 30);
         setAddDiscount(p.addDiscount ? p.addDiscount * 100 : 0);
@@ -2991,8 +2989,8 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   };
 
   const handleSubmit = async () => {
-    if (!model || !qty) {
-      setError("Select model and qty.");
+    if (!model || !qty || +qty <= 0) {
+      setError("Select model and enter qty.");
       return;
     }
     setLoading(true);
@@ -3003,13 +3001,14 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           date,
+          invoiceDate: invoiceDate || undefined,
           model,
           location,
-          qtyPurchased: qty,
+          qtyPurchased: +(qty || 0),
           unitListPrice: +(listPrice || 0),
           baseDiscount: +(baseDiscount || 0),
           addDiscount: +(addDiscount || 0),
-          customFinalPrice: customFinal !== "" ? +customFinal : 0,
+          customFinalPrice: customFinal !== "" ? +customFinal : undefined,
           courierCharges: +(courier || 0),
           supplier,
         }),
@@ -3024,24 +3023,20 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
         data.effectiveCostPerUnit ?? pricing?.effectiveCost ?? 0;
 
       if (batchMode) {
-        // Add to the running batch list, clear only the line-item fields,
-        // and stay on this screen so the next item can be entered immediately.
         setBatchLines((lines) => [
           ...lines,
           {
             model,
-            qty: +qty,
+            qty: +(qty || 0),
             unitPrice: effectiveCost,
-            total: +qty * effectiveCost,
+            total: +(qty || 0) * effectiveCost,
           },
         ]);
         setSuccess(
-          `Added: ${qty} × ${model} @ ₹${effectiveCost.toFixed(0)}/unit = ₹${(qty * effectiveCost).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`,
+          `Added: ${qty} × ${model} @ ₹${effectiveCost.toFixed(0)}/unit = ₹${(+(qty || 0) * effectiveCost).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`,
         );
         clearLineFields();
         setTimeout(() => setSuccess(""), 1800);
-        // Refresh parent data quietly (stock counts etc.) without leaving the screen
-        onSuccess();
         modelInputRef.current?.focus();
       } else {
         setSuccess(
@@ -3062,6 +3057,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const handleNewPO = () => {
     setBatchLines([]);
     setSupplier("");
+    setInvoiceDate("");
     clearLineFields();
     setCourier(0);
   };
@@ -3211,13 +3207,23 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               inputRef={modelInputRef}
             />
           </FG>
-          <FG label="Date">
+
+          {/* ── Two date fields side by side ── */}
+          <FG label="Purchase / receipt date">
             <input
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
             />
           </FG>
+          <FG label="Invoice date" note="supplier's invoice date">
+            <input
+              type="date"
+              value={invoiceDate}
+              onChange={(e) => setInvoiceDate(e.target.value)}
+            />
+          </FG>
+
           <FG label="Location">
             <select
               value={location}
@@ -3232,10 +3238,11 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               type="text"
               inputMode="numeric"
               pattern="[0-9]*"
-              value={qty === 0 ? "" : String(qty)}
+              value={qty === "" ? "" : String(qty)}
+              placeholder="e.g. 10"
               onChange={(e) => {
                 const digits = e.target.value.replace(/[^0-9]/g, "");
-                setQty(digits === "" ? 0 : parseInt(digits, 10));
+                setQty(digits === "" ? "" : parseInt(digits, 10));
               }}
             />
           </FG>
@@ -3291,12 +3298,10 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               value={customFinal === "" ? "" : String(customFinal)}
               onChange={(e) => {
                 const v = e.target.value.replace(/[^0-9.]/g, "");
-                const num = v === "" ? "" : +v;
+                const num: number | "" = v === "" ? "" : +v;
                 setCustomFinal(num);
-                // Typing the unit price directly keeps the total in sync
-                // so the two fields never drift apart from each other.
                 setCustomTotalPrice(
-                  num === "" || !qty ? "" : +(num * qty).toFixed(2),
+                  num === "" || !qty ? "" : +(num * +qty).toFixed(2),
                 );
               }}
               placeholder="auto-calculated or enter per-unit price manually"
@@ -3312,15 +3317,15 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               value={customTotalPrice === "" ? "" : String(customTotalPrice)}
               onChange={(e) => {
                 const v = e.target.value.replace(/[^0-9.]/g, "");
-                const num = v === "" ? "" : +v;
+                const num: number | "" = v === "" ? "" : +v;
                 setCustomTotalPrice(num);
                 setCustomFinal(
-                  num === "" || !qty ? "" : +(num / qty).toFixed(2),
+                  num === "" || !qty ? "" : +(+num / +qty).toFixed(2),
                 );
               }}
               placeholder="e.g. 18000 for the whole line"
             />
-            {customTotalPrice !== "" && qty > 0 && (
+            {customTotalPrice !== "" && qty !== "" && +qty > 0 && (
               <div
                 style={{
                   fontSize: 10,
@@ -3328,8 +3333,8 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
                   marginTop: 4,
                 }}
               >
-                = ₹{(+customTotalPrice / qty).toFixed(0)} per unit across {qty}{" "}
-                unit{qty === 1 ? "" : "s"}
+                = ₹{(+customTotalPrice / +qty).toFixed(0)} per unit across {qty}{" "}
+                unit{+qty === 1 ? "" : "s"}
               </div>
             )}
           </FG>
@@ -3436,7 +3441,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
             />
             {courier ? (
               <PriceRow
-                label={`Courier (shared ÷ ${qty})`}
+                label={`Courier (shared ÷ ${qty || "?"})`}
                 value={`₹${pricing.courierPer.toFixed(0)}/unit`}
               />
             ) : null}
@@ -3453,7 +3458,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               }}
             >
               <PriceRow
-                label={`Line total — ${qty} unit${qty === 1 ? "" : "s"} (ex-GST, incl. courier)`}
+                label={`Line total — ${qty || 0} unit${+qty === 1 ? "" : "s"} (ex-GST, incl. courier)`}
                 value={`₹${pricing.totalVal.toLocaleString("en-IN", { maximumFractionDigits: 0 })}`}
                 final
               />
@@ -5696,5 +5701,5 @@ export async function restoreFifo(
 
 ========================================
   TOTAL FILES: 27
-  TOTAL LINES:     5695
+  TOTAL LINES:     5700
 ========================================

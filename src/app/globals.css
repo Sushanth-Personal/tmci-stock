@@ -49,58 +49,141 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 input::placeholder { color: var(--text-muted); }
 label { font-size: 11px; color: var(--text-dim); display: block; margin-bottom: 3px; }
 
-/* ── Native date inputs ─────────────────────────────────────────────────
-   The browser's default calendar icon renders dark/faint against this
-   dark theme, so invert it to white. The whole-field-opens-the-picker
-   behavior is handled in JS (see the document-level click listener in
-   app/page.tsx) — CSS alone can't make a click anywhere in the field
-   trigger showPicker(), only the icon itself is natively clickable. */
-input[type="date"] {
-  cursor: pointer;
-}
+input[type="date"] { cursor: pointer; }
 input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(1) brightness(2);
   opacity: 0.75;
   cursor: pointer;
 }
-input[type="date"]::-webkit-calendar-picker-indicator:hover {
-  opacity: 1;
-}
+input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
 
 .btn-primary {
   background: var(--accent); color: white; border: none; border-radius: 6px;
   padding: 7px 16px; font-size: 12px; font-weight: 500; cursor: pointer; transition: opacity 0.15s;
+  white-space: nowrap;
 }
 .btn-primary:hover { opacity: 0.85; }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-ghost {
   background: transparent; color: var(--text-dim); border: 1px solid var(--border);
   border-radius: 6px; padding: 7px 12px; font-size: 12px; cursor: pointer;
+  white-space: nowrap;
 }
 .btn-ghost:hover { border-color: var(--text-muted); }
 
-/* ── Global mobile responsiveness ──────────────────────────────────────── */
+/* ── Shared form grid ───────────────────────────────────────────────────── */
+.form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.form-grid-full { grid-column: 1 / -1; }
+
+/* ── Shared date-filter row ─────────────────────────────────────────────── */
+.date-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.date-filter-row label { margin-bottom: 0; white-space: nowrap; }
+.date-filter-row input[type="date"] { width: 140px; flex-shrink: 0; }
+.date-filter-row select { flex-shrink: 0; }
+
+/* ── Action button row ──────────────────────────────────────────────────── */
+.action-row {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+/* ── Table scroll wrapper ───────────────────────────────────────────────── */
+.table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.table-scroll table { min-width: 560px; }
+
+/* ── Dashboard metric grid ──────────────────────────────────────────────── */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* ── Downloads button grid ──────────────────────────────────────────────── */
+.dl-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+/* ── Location cards (Stock by location / Transfer) ──────────────────────── */
+.loc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* ── Banner cards ───────────────────────────────────────────────────────── */
+.sv-banner { display: flex; gap: 10px; flex-wrap: wrap; }
+.sv-banner-card {
+  flex: 1;
+  min-width: 120px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   MOBILE  ≤ 720px
+   ════════════════════════════════════════════════════════════════════════ */
 @media (max-width: 720px) {
   body { font-size: 13px; }
 
-  /* Tables: scroll horizontally inside their own box instead of the page */
-  table { min-width: 600px; }
+  /* All form grids → single column */
+  .form-grid { grid-template-columns: 1fr; }
+  .form-grid-full { grid-column: 1; }
 
-  /* Any plain grid-of-2 form layout used across Add Item / Record Sale /
-     Record Purchase / Stock Transfer collapses to a single column */
-  div[style*="grid-template-columns: 1fr 1fr"],
-  div[style*='grid-template-columns:1fr 1fr'] {
-    grid-template-columns: 1fr !important;
+  /* Date filter rows → stack vertically */
+  .date-filter-row {
+    flex-direction: column;
+    align-items: stretch;
   }
+  .date-filter-row input[type="date"] { width: 100%; }
+  .date-filter-row select { width: 100%; }
+  .date-filter-row label { font-size: 11px; }
 
-  /* Four-up dashboard metric rows collapse to two-up */
-  div[style*="repeat(4,1fr)"] {
-    grid-template-columns: repeat(2, 1fr) !important;
-  }
+  /* Metric grid → 2 columns */
+  .metric-grid { grid-template-columns: repeat(2, 1fr); }
+
+  /* Downloads → 1 column */
+  .dl-grid { grid-template-columns: 1fr; }
+
+  /* Location grid → 1 column */
+  .loc-grid { grid-template-columns: 1fr; }
+
+  /* Tables always scroll */
+  .table-scroll table { min-width: 560px; }
+
+  /* Action rows wrap nicely */
+  .action-row { justify-content: stretch; }
+  .action-row .btn-primary,
+  .action-row .btn-ghost { flex: 1; text-align: center; }
+
+  /* Banner → stack */
+  .sv-banner { flex-direction: column; }
+  .sv-banner-card { min-width: 0; }
+
+  /* Stock transfer arrow row */
+  .transfer-direction { flex-direction: column; }
 }
 
 @media (max-width: 420px) {
-  div[style*="repeat(4,1fr)"] {
-    grid-template-columns: 1fr !important;
-  }
+  .metric-grid { grid-template-columns: 1fr; }
 }

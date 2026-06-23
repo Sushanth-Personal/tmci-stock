@@ -24,8 +24,6 @@ export default function Dashboard({ products, sales, purchases }: Props) {
   const [to, setTo] = useState(todayStr);
   const [location, setLocation] = useState("both");
 
-  // Stock now lives in its own sheet (with FIFO cost price baked in via
-  // /api/stock), not on the product rows — fetch it directly here.
   const [stock, setStock] = useState<any[]>([]);
   const [stockLoading, setStockLoading] = useState(true);
 
@@ -54,7 +52,6 @@ export default function Dashboard({ products, sales, purchases }: Props) {
     return { kochiItems, bloreItems, kochiValue, bloreValue };
   }, [stock]);
 
-  // Low-stock list, merged by itemCode across both locations
   const lowStockRows = useMemo(() => {
     const map = new Map<string, any>();
     for (const s of stock) {
@@ -94,10 +91,6 @@ export default function Dashboard({ products, sales, purchases }: Props) {
       if (location !== "both" && p.location !== location) return false;
       return true;
     });
-
-    // Sales/Purchases now come from the unified Transactions sheet via
-    // /api/sales and /api/purchases, with fields: qty, unitPrice, total,
-    // costPrice (sales only, FIFO-weighted).
     const salesVal = filteredSales.reduce((s, x) => s + (x.total || 0), 0);
     const salesCost = filteredSales.reduce(
       (s, x) => s + (x.qty || 0) * (x.costPrice || 0),
@@ -108,7 +101,6 @@ export default function Dashboard({ products, sales, purchases }: Props) {
       (s, x) => s + (x.total || 0),
       0,
     );
-
     const salesByModel: Record<string, { units: number; value: number }> = {};
     for (const s of filteredSales) {
       if (!salesByModel[s.model])
@@ -120,7 +112,6 @@ export default function Dashboard({ products, sales, purchases }: Props) {
       .sort((a, b) => b[1].value - a[1].value)
       .slice(0, 5)
       .map(([model, d]) => ({ model, ...d }));
-
     return { salesVal, margin, purchasesVal, topMovers };
   }, [sales, purchases, from, to, location]);
 
@@ -183,48 +174,31 @@ export default function Dashboard({ products, sales, purchases }: Props) {
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {/* Period filter */}
       <Card>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-          }}
-        >
-          <SectionLabel>Period</SectionLabel>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <label style={{ marginBottom: 0 }}>From</label>
-            <input
-              type="date"
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              style={{ width: 140 }}
-            />
-            <label style={{ marginBottom: 0 }}>To</label>
-            <input
-              type="date"
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              style={{ width: 140 }}
-            />
-            <select
-              value={location}
-              onChange={(e) => setLocation(e.target.value)}
-              style={{ width: 150 }}
-            >
-              <option value="both">Both locations</option>
-              <option value="Kochi">Kochi only</option>
-              <option value="Bangalore">Bangalore only</option>
-            </select>
-          </div>
+        <SectionLabel>Period & filters</SectionLabel>
+        <div className="date-filter-row">
+          <label>From</label>
+          <input
+            type="date"
+            value={from}
+            onChange={(e) => setFrom(e.target.value)}
+          />
+          <label>To</label>
+          <input
+            type="date"
+            value={to}
+            onChange={(e) => setTo(e.target.value)}
+          />
+          <select
+            value={location}
+            onChange={(e) => setLocation(e.target.value)}
+            style={{ minWidth: 140 }}
+          >
+            <option value="both">Both locations</option>
+            <option value="Kochi">Kochi only</option>
+            <option value="Bangalore">Bangalore only</option>
+          </select>
         </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4,1fr)",
-            gap: 8,
-            marginTop: 12,
-          }}
-        >
+        <div className="metric-grid">
           <Metric
             label="Stock value (ex-GST)"
             value={
@@ -255,7 +229,7 @@ export default function Dashboard({ products, sales, purchases }: Props) {
         </div>
       </Card>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div className="loc-grid">
         <Card>
           <SectionLabel>Stock by location</SectionLabel>
           {stockLoading ? (
@@ -263,36 +237,38 @@ export default function Dashboard({ products, sales, purchases }: Props) {
               Loading…
             </div>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Location</th>
-                  <th>Items</th>
-                  <th>Value (ex-GST)</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Kochi</td>
-                  <td>{stockTotals.kochiItems}</td>
-                  <td>{fmt(stockTotals.kochiValue)}</td>
-                </tr>
-                <tr>
-                  <td>Bangalore</td>
-                  <td>{stockTotals.bloreItems}</td>
-                  <td>{fmt(stockTotals.bloreValue)}</td>
-                </tr>
-                <tr>
-                  <td style={{ fontWeight: 600 }}>Total</td>
-                  <td style={{ fontWeight: 600 }}>
-                    {stockTotals.kochiItems + stockTotals.bloreItems}
-                  </td>
-                  <td style={{ fontWeight: 600 }}>
-                    {fmt(stockTotals.kochiValue + stockTotals.bloreValue)}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Location</th>
+                    <th>Items</th>
+                    <th>Value (ex-GST)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Kochi</td>
+                    <td>{stockTotals.kochiItems}</td>
+                    <td>{fmt(stockTotals.kochiValue)}</td>
+                  </tr>
+                  <tr>
+                    <td>Bangalore</td>
+                    <td>{stockTotals.bloreItems}</td>
+                    <td>{fmt(stockTotals.bloreValue)}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ fontWeight: 600 }}>Total</td>
+                    <td style={{ fontWeight: 600 }}>
+                      {stockTotals.kochiItems + stockTotals.bloreItems}
+                    </td>
+                    <td style={{ fontWeight: 600 }}>
+                      {fmt(stockTotals.kochiValue + stockTotals.bloreValue)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           )}
         </Card>
         <Card>
@@ -302,66 +278,69 @@ export default function Dashboard({ products, sales, purchases }: Props) {
               No sales in this period.
             </div>
           ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th>Model</th>
-                  <th>Units sold</th>
-                  <th>Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {stats.topMovers.map((m) => (
-                  <tr key={m.model}>
-                    <td>{m.model}</td>
-                    <td>{m.units}</td>
-                    <td>{fmt(m.value)}</td>
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th>Units sold</th>
+                    <th>Value</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {stats.topMovers.map((m) => (
+                    <tr key={m.model}>
+                      <td>{m.model}</td>
+                      <td>{m.units}</td>
+                      <td>{fmt(m.value)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </Card>
       </div>
 
-      {/* Low stock alert */}
       {!stockLoading && lowStockRows.length > 0 && (
         <Card>
           <SectionLabel>⚠ Low / Out of stock</SectionLabel>
-          <table>
-            <thead>
-              <tr>
-                <th>Model</th>
-                <th>Category</th>
-                <th>Kochi</th>
-                <th>Bangalore</th>
-                <th>Total</th>
-                <th>Cost Price</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lowStockRows.map((p) => (
-                <tr key={p.itemCode}>
-                  <td>{p.model}</td>
-                  <td>{p.category}</td>
-                  <td>{p.stockKochi}</td>
-                  <td>{p.stockBlore}</td>
-                  <td
-                    style={{
-                      fontWeight: 500,
-                      color:
-                        p.stockKochi + p.stockBlore === 0
-                          ? "var(--accent-red)"
-                          : "var(--accent-amber)",
-                    }}
-                  >
-                    {p.stockKochi + p.stockBlore}
-                  </td>
-                  <td>₹{(p.costPrice || 0).toLocaleString("en-IN")}</td>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Category</th>
+                  <th>Kochi</th>
+                  <th>Bangalore</th>
+                  <th>Total</th>
+                  <th>Cost Price</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {lowStockRows.map((p) => (
+                  <tr key={p.itemCode}>
+                    <td>{p.model}</td>
+                    <td>{p.category}</td>
+                    <td>{p.stockKochi}</td>
+                    <td>{p.stockBlore}</td>
+                    <td
+                      style={{
+                        fontWeight: 500,
+                        color:
+                          p.stockKochi + p.stockBlore === 0
+                            ? "var(--accent-red)"
+                            : "var(--accent-amber)",
+                      }}
+                    >
+                      {p.stockKochi + p.stockBlore}
+                    </td>
+                    <td>₹{(p.costPrice || 0).toLocaleString("en-IN")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Card>
       )}
     </div>
