@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import SnapshotPanel from "@/components/SnapshotPanel";
 
 interface Props {
   products: any[];
@@ -315,6 +316,7 @@ export default function Downloads({ products, sales, purchases }: Props) {
           </div>
         </div>
       )}
+      <SnapshotPanel />
     </div>
   );
 }
