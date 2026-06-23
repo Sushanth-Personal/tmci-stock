@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0f1117;
+  --bg-card: #161b27;
+  --bg-input: #1d2535;
+  --border: #2a3347;
+  --text: #e2e8f0;
+  --text-muted: #64748b;
+  --text-dim: #94a3b8;
+  --accent: #3b82f6;
+  --accent-green: #22c55e;
+  --accent-amber: #f59e0b;
+  --accent-red: #ef4444;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  font-size: 13px;
+  margin: 0;
+}
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+table { border-collapse: collapse; width: 100%; }
+th { font-size: 10px; font-weight: 500; color: var(--text-muted); text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); background: #1a2132; white-space: nowrap; }
+td { padding: 6px 10px; border-bottom: 1px solid var(--border); color: var(--text); font-size: 12px; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+
+input, select, textarea {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 9px;
+  width: 100%;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+input::placeholder { color: var(--text-muted); }
+label { font-size: 11px; color: var(--text-dim); display: block; margin-bottom: 3px; }
+
+/* ── Native date inputs ─────────────────────────────────────────────────
+   The browser's default calendar icon renders dark/faint against this
+   dark theme, so invert it to white. The whole-field-opens-the-picker
+   behavior is handled in JS (see the document-level click listener in
+   app/page.tsx) — CSS alone can't make a click anywhere in the field
+   trigger showPicker(), only the icon itself is natively clickable. */
+input[type="date"] {
+  cursor: pointer;
+}
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(2);
+  opacity: 0.75;
+  cursor: pointer;
+}
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+  opacity: 1;
+}
+
+.btn-primary {
+  background: var(--accent); color: white; border: none; border-radius: 6px;
+  padding: 7px 16px; font-size: 12px; font-weight: 500; cursor: pointer; transition: opacity 0.15s;
+}
+.btn-primary:hover { opacity: 0.85; }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-ghost {
+  background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+  border-radius: 6px; padding: 7px 12px; font-size: 12px; cursor: pointer;
+}
+.btn-ghost:hover { border-color: var(--text-muted); }
+
+/* ── Global mobile responsiveness ──────────────────────────────────────── */
+@media (max-width: 720px) {
+  body { font-size: 13px; }
+
+  /* Tables: scroll horizontally inside their own box instead of the page */
+  table { min-width: 600px; }
+
+  /* Any plain grid-of-2 form layout used across Add Item / Record Sale /
+     Record Purchase / Stock Transfer collapses to a single column */
+  div[style*="grid-template-columns: 1fr 1fr"],
+  div[style*='grid-template-columns:1fr 1fr'] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Four-up dashboard metric rows collapse to two-up */
+  div[style*="repeat(4,1fr)"] {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+}
+
+@media (max-width: 420px) {
+  div[style*="repeat(4,1fr)"] {
+    grid-template-columns: 1fr !important;
+  }
+}
