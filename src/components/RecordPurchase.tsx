@@ -608,7 +608,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               value={customFinal === "" ? "" : String(customFinal)}
               onChange={(e) => {
                 const v = e.target.value.replace(/[^0-9.]/g, "");
-                const num = v === "" ? "" : +v;
+                const num: number | "" = v === "" ? "" : +v;
                 setCustomFinal(num);
                 setCustomTotalPrice(
                   num === "" || !qty || qty === ""
@@ -629,7 +629,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               value={customTotalPrice === "" ? "" : String(customTotalPrice)}
               onChange={(e) => {
                 const v = e.target.value.replace(/[^0-9.]/g, "");
-                const num = v === "" ? "" : +v;
+                const num: number | "" = v === "" ? "" : +v;
                 setCustomTotalPrice(num);
                 setCustomFinal(
                   num === "" || !qty || qty === ""
