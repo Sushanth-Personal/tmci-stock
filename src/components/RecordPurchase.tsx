@@ -611,9 +611,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
                 const num: number | "" = v === "" ? "" : +v;
                 setCustomFinal(num);
                 setCustomTotalPrice(
-                  num === "" || !qty || qty === ""
-                    ? ""
-                    : +(num * +qty).toFixed(2),
+                  num === "" || !qty ? "" : +(num * +qty).toFixed(2),
                 );
               }}
               placeholder="auto-calculated or enter per-unit price manually"
@@ -632,9 +630,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
                 const num: number | "" = v === "" ? "" : +v;
                 setCustomTotalPrice(num);
                 setCustomFinal(
-                  num === "" || !qty || qty === ""
-                    ? ""
-                    : +(+num / +qty).toFixed(2),
+                  num === "" || !qty ? "" : +(+num / +qty).toFixed(2),
                 );
               }}
               placeholder="e.g. 18000 for the whole line"
