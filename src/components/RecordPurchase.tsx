@@ -60,7 +60,7 @@ function ModelCombobox({
   products: any[];
   value: string;
   onSelect: (model: string) => void;
-  inputRef: React.RefObject<HTMLInputElement>;
+  inputRef: React.RefObject<HTMLInputElement | null>;
 }) {
   const [query, setQuery] = useState(value);
   const [open, setOpen] = useState(false);
