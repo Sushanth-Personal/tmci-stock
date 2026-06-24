@@ -12,6 +12,7 @@ const NAV: Array<{
   { id: "sale", label: "Record Sale", icon: "⊕", section: "Transactions" },
   { id: "purchase", label: "Record Purchase", icon: "↓" },
   { id: "transfer", label: "Stock Transfer", icon: "⇄" },
+  { id: "quotation", label: "Quotation", icon: "📄" },
   { id: "transactions", label: "Transaction History", icon: "🕘" },
   { id: "additem", label: "Add New Item", icon: "+", section: "Catalogue" },
   { id: "downloads", label: "Downloads", icon: "↧", section: "Reports" },

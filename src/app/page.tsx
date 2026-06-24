@@ -9,6 +9,7 @@ import StockTransfer from "@/components/StockTransfer";
 import AddItem from "@/components/AddItem";
 import Downloads from "@/components/Downloads";
 import Transactions from "@/components/Transactions";
+import Quotation from "@/components/Quotation";
 
 export type Screen =
   | "dashboard"
@@ -18,6 +19,7 @@ export type Screen =
   | "transfer"
   | "additem"
   | "transactions"
+  | "quotation"
   | "downloads";
 
 const TITLES: Record<Screen, string> = {
@@ -28,6 +30,7 @@ const TITLES: Record<Screen, string> = {
   transfer: "Stock Transfer",
   additem: "Add New Item",
   transactions: "Transaction History",
+  quotation: "Quotation",
   downloads: "Downloads & Reports",
 };
 
@@ -285,6 +288,7 @@ export default function Home() {
           {screen === "transactions" && (
             <Transactions sales={sales} purchases={purchases} />
           )}
+          {screen === "quotation" && <Quotation products={products} />}
           {screen === "downloads" && (
             <Downloads
               products={products}
