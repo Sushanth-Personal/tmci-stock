@@ -1,6 +1,7 @@
 // src/components/StockView.tsx
 "use client";
 import { useState, useMemo, useEffect } from "react";
+import DatasheetButton from "@/components/DatasheetButton";
 
 interface StockEntry {
   itemCode: string;
@@ -64,13 +65,8 @@ export default function StockView({ products: _ }: { products: any[] }) {
     return Array.from(s).sort();
   }, [stock]);
 
-  // Merge Kochi + Bangalore into one display row per model.
-  // Cost price: use the highest non-zero cost across locations (FIFO from API).
-  // Stock value: sum each location's (qty × its own costPrice) to avoid
-  // applying one location's cost to the other's qty.
   const rows = useMemo((): DisplayRow[] => {
     const map = new Map<string, DisplayRow>();
-
     for (const s of stock) {
       const key = s.itemCode;
       if (!map.has(key)) {
@@ -88,22 +84,14 @@ export default function StockView({ products: _ }: { products: any[] }) {
         });
       }
       const row = map.get(key)!;
-
       if (s.location === "Kochi") row.stockKochi = s.currentStock;
       if (s.location === "Bangalore") row.stockBlore = s.currentStock;
-
-      // Accumulate stock value per location using that location's own cost
       row.stockValue += s.currentStock * (s.costPrice ?? 0);
-
-      // Keep the best known cost price (highest non-zero across locations)
       if ((s.costPrice ?? 0) > row.costPrice) row.costPrice = s.costPrice;
     }
-
-    // Recalculate totals after all locations merged
     for (const row of map.values()) {
       row.total = row.stockKochi + row.stockBlore;
     }
-
     return Array.from(map.values());
   }, [stock]);
 
@@ -132,7 +120,6 @@ export default function StockView({ products: _ }: { products: any[] }) {
       }
       return true;
     });
-
     result = [...result].sort((a, b) => {
       const cmp =
         sortCol === "model"
@@ -140,7 +127,6 @@ export default function StockView({ products: _ }: { products: any[] }) {
           : a[sortCol] - b[sortCol];
       return sortDir === "asc" ? cmp : -cmp;
     });
-
     return result;
   }, [rows, tab, search, category, sortCol, sortDir]);
 
@@ -253,42 +239,13 @@ export default function StockView({ products: _ }: { products: any[] }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <style>{`
-        .stockview-search {
-          font-size: 14px !important;
-          padding: 11px 14px !important;
-        }
-        .stockview-filterbar {
-          display: flex;
-          gap: 8px;
-          margin-bottom: 10px;
-        }
-        .stockview-table-scroll {
-          overflow-x: auto;
-          border: 1px solid var(--border);
-          border-radius: 8px;
-        }
-        .stockview-table-scroll table { min-width: 760px; }
-        .stockview-tabs-row {
-          display: flex;
-          gap: 0;
-          border-bottom: 1px solid var(--border);
-          margin-bottom: 10px;
-          flex-wrap: wrap;
-          align-items: center;
-        }
-        .sv-banner {
-          display: flex;
-          gap: 10px;
-          flex-wrap: wrap;
-        }
-        .sv-banner-card {
-          flex: 1;
-          min-width: 120px;
-          background: var(--bg-input);
-          border: 1px solid var(--border);
-          border-radius: 8px;
-          padding: 10px 14px;
-        }
+        .stockview-search { font-size: 14px !important; padding: 11px 14px !important; }
+        .stockview-filterbar { display: flex; gap: 8px; margin-bottom: 10px; }
+        .stockview-table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
+        .stockview-table-scroll table { min-width: 860px; }
+        .stockview-tabs-row { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
+        .sv-banner { display: flex; gap: 10px; flex-wrap: wrap; }
+        .sv-banner-card { flex: 1; min-width: 120px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
         @media (max-width: 720px) {
           .stockview-filterbar { flex-direction: column; }
           .stockview-filterbar select { width: 100% !important; }
@@ -296,7 +253,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
         }
       `}</style>
 
-      {/* ── Inventory summary banner ───────────────────────────────────── */}
+      {/* Inventory summary banner */}
       <div
         style={{
           background: "var(--bg-card)",
@@ -398,7 +355,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
         </div>
       </div>
 
-      {/* ── Stock table ────────────────────────────────────────────────── */}
+      {/* Stock table */}
       <div
         style={{
           background: "var(--bg-card)",
@@ -471,13 +428,14 @@ export default function StockView({ products: _ }: { products: any[] }) {
                   Stock value
                 </SortTh>
                 <th>Status</th>
+                <th>Datasheet</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={11}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -490,7 +448,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
               ) : filtered.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={11}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -555,6 +513,9 @@ export default function StockView({ products: _ }: { products: any[] }) {
                         >
                           {st.label}
                         </span>
+                      </td>
+                      <td>
+                        <DatasheetButton model={p.model} />
                       </td>
                     </tr>
                   );

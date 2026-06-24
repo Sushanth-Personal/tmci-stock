@@ -1,6 +1,7 @@
 "use client";
 import { useState, useMemo, useRef, useEffect } from "react";
 import { createPortal } from "react-dom";
+import DatasheetButton from "@/components/DatasheetButton";
 
 interface Props {
   products: any[];
@@ -785,6 +786,34 @@ export default function Quotation({ products }: Props) {
             {copied ? "✓ Copied!" : "Copy email body"}
           </button>
         </div>
+        {lines.length > 0 && lines.some((l) => l.desc) && (
+          <div style={card}>
+            <div style={sectionLabel}>
+              Datasheets for items in this quotation
+            </div>
+            <div
+              style={{
+                display: "flex",
+                gap: 12,
+                flexWrap: "wrap",
+              }}
+            >
+              {lines
+                .filter((l) => l.desc)
+                .map((l, i) => (
+                  <div
+                    key={i}
+                    style={{ display: "flex", alignItems: "center", gap: 8 }}
+                  >
+                    <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                      {l.desc}
+                    </span>
+                    <DatasheetButton model={l.desc} />
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
