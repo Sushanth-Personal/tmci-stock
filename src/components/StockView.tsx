@@ -5,6 +5,7 @@ import DatasheetButton from "@/components/DatasheetButton";
 
 interface StockEntry {
   itemCode: string;
+  make: string;
   model: string;
   description: string;
   location: string;
@@ -20,7 +21,9 @@ interface StockEntry {
 }
 
 interface DisplayRow {
+  key: string;
   itemCode: string;
+  make: string;
   model: string;
   description: string;
   category: string;
@@ -48,6 +51,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
   const [tab, setTab] = useState("all");
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
+  const [make, setMake] = useState("all");
   const [sortCol, setSortCol] = useState<SortCol>("model");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
@@ -65,13 +69,22 @@ export default function StockView({ products: _ }: { products: any[] }) {
     return Array.from(s).sort();
   }, [stock]);
 
+  const makes = useMemo(() => {
+    const s = new Set(stock.map((r) => r.make).filter(Boolean));
+    return Array.from(s).sort();
+  }, [stock]);
+
   const rows = useMemo((): DisplayRow[] => {
     const map = new Map<string, DisplayRow>();
     for (const s of stock) {
-      const key = s.itemCode;
+      // Composite key: itemCode alone isn't guaranteed unique across makes
+      // (e.g. a non-Fluke line could reuse a numeric code).
+      const key = `${s.make}|${s.itemCode}`;
       if (!map.has(key)) {
         map.set(key, {
+          key,
           itemCode: s.itemCode,
+          make: s.make,
           model: s.model,
           description: s.description,
           category: s.category,
@@ -110,11 +123,13 @@ export default function StockView({ products: _ }: { products: any[] }) {
       if (tab === "blore" && p.stockBlore === 0) return false;
       if (tab === "out" && p.total !== 0) return false;
       if (category !== "all" && p.category !== category) return false;
+      if (make !== "all" && p.make !== make) return false;
       if (search) {
         const q = search.toLowerCase();
         if (
           !p.model?.toLowerCase().includes(q) &&
-          !p.itemCode.toLowerCase().includes(q)
+          !p.itemCode.toLowerCase().includes(q) &&
+          !p.make?.toLowerCase().includes(q)
         )
           return false;
       }
@@ -128,7 +143,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
       return sortDir === "asc" ? cmp : -cmp;
     });
     return result;
-  }, [rows, tab, search, category, sortCol, sortDir]);
+  }, [rows, tab, search, category, make, sortCol, sortDir]);
 
   const grandTotalValue = useMemo(
     () => rows.reduce((s, p) => s + p.stockValue, 0),
@@ -242,7 +257,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
         .stockview-search { font-size: 14px !important; padding: 11px 14px !important; }
         .stockview-filterbar { display: flex; gap: 8px; margin-bottom: 10px; }
         .stockview-table-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
-        .stockview-table-scroll table { min-width: 860px; }
+        .stockview-table-scroll table { min-width: 940px; }
         .stockview-tabs-row { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 10px; flex-wrap: wrap; align-items: center; }
         .sv-banner { display: flex; gap: 10px; flex-wrap: wrap; }
         .sv-banner-card { flex: 1; min-width: 120px; background: var(--bg-input); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
@@ -320,7 +335,10 @@ export default function StockView({ products: _ }: { products: any[] }) {
               {rows.filter((r) => r.total === 0).length} out of stock
             </div>
           </div>
-          {(tab !== "all" || search || category !== "all") && (
+          {(tab !== "all" ||
+            search ||
+            category !== "all" ||
+            make !== "all") && (
             <div
               className="sv-banner-card"
               style={{
@@ -387,11 +405,23 @@ export default function StockView({ products: _ }: { products: any[] }) {
         <div className="stockview-filterbar">
           <input
             className="stockview-search"
-            placeholder="Search model or item code…"
+            placeholder="Search make, model or item code…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             style={{ flex: 1 }}
           />
+          <select
+            value={make}
+            onChange={(e) => setMake(e.target.value)}
+            style={{ width: 140 }}
+          >
+            <option value="all">All makes</option>
+            {makes.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
           <select
             value={category}
             onChange={(e) => setCategory(e.target.value)}
@@ -410,6 +440,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
           <table>
             <thead>
               <tr>
+                <th>Make</th>
                 <SortTh col="model">Model</SortTh>
                 <th>Category</th>
                 <th>Item code</th>
@@ -422,8 +453,8 @@ export default function StockView({ products: _ }: { products: any[] }) {
                 <SortTh col="total" align="right">
                   Total
                 </SortTh>
-                <th style={{ textAlign: "right" }}>Cost price</th>
-                <th style={{ textAlign: "right" }}>List price</th>
+                <th style={{ textAlign: "right" }}>Purchase Cost</th>
+                <th style={{ textAlign: "right" }}>List Price</th>
                 <SortTh col="stockValue" align="right">
                   Stock value
                 </SortTh>
@@ -435,7 +466,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
               {loading ? (
                 <tr>
                   <td
-                    colSpan={11}
+                    colSpan={12}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -448,7 +479,7 @@ export default function StockView({ products: _ }: { products: any[] }) {
               ) : filtered.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={11}
+                    colSpan={12}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -462,7 +493,8 @@ export default function StockView({ products: _ }: { products: any[] }) {
                 filtered.map((p) => {
                   const st = status(p.total);
                   return (
-                    <tr key={p.itemCode}>
+                    <tr key={p.key}>
+                      <td style={{ color: "var(--text-muted)" }}>{p.make}</td>
                       <td style={{ fontWeight: 500 }}>{p.model}</td>
                       <td style={{ color: "var(--text-muted)" }}>
                         {p.category || "—"}

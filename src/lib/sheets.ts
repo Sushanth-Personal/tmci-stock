@@ -118,48 +118,61 @@ function colLetter(n: number): string {
   return s;
 }
 
-// Ensure "Fluke Lots" exists (auto-create on first use, per the agreed design).
-export async function ensureLotsSheet() {
-  const exists = await sheetExists(SHEETS.LOTS);
-  if (!exists) {
-    await createSheetWithHeader(SHEETS.LOTS, [
-      "Lot ID",
-      "Date",
-      "Item Code",
-      "Model",
-      "Location",
-      "Qty Purchased",
-      "Remaining Qty",
-      "Unit Purchase Price (₹)",
-      "Vendor",
-      "PO / Invoice No",
-    ]);
-  }
+// ─────────────────────────────────────────────────────────────────────────
+// HEADER-NAME-BASED COLUMN LOOKUP
+//
+// Why this exists: every read/write below used to assume a FIXED column
+// position (A=Item Code, B=Model, etc). The first time a column gets
+// inserted or reordered in the actual Google Sheet — e.g. adding "Make" —
+// every field after it silently shifts and starts reading/writing the
+// wrong data (no error, just wrong numbers). This happened with the Stock
+// sheet's "Make" column: List Price ended up reading what was actually
+// the Current Stock column.
+//
+// Fix: look up each field's column index by its HEADER TEXT (row 1) at
+// runtime, instead of hardcoding "column B is always Model". Inserting or
+// reordering columns in the sheet no longer breaks anything, as long as
+// the header text itself doesn't change.
+// ─────────────────────────────────────────────────────────────────────────
+const headerCache = new Map<string, Map<string, number>>();
+
+async function getHeaderMap(sheetName: string): Promise<Map<string, number>> {
+  const cached = headerCache.get(sheetName);
+  if (cached) return cached;
+  const rows = await readRange(`'${sheetName}'!1:1`);
+  const header = rows[0] ?? [];
+  const map = new Map<string, number>();
+  header.forEach((h, i) => {
+    const key = String(h ?? "")
+      .trim()
+      .toLowerCase();
+    if (key && !map.has(key)) map.set(key, i);
+  });
+  headerCache.set(sheetName, map);
+  return map;
 }
 
-// Ensure "Transactions" has the new "Cost Price (₹)" column (col M).
-export async function ensureCostPriceColumn() {
-  const header = await readRange(`'${SHEETS.TRANSACTIONS}'!A1:M1`);
-  const row = header[0] ?? [];
-  if (!row[12] || String(row[12]).trim() === "") {
-    await batchUpdate([
-      {
-        range: `'${SHEETS.TRANSACTIONS}'!M1`,
-        values: [["Cost Price (₹)"]],
-      },
-    ]);
+// Looks up a column index by header text. Accepts multiple candidate names
+// (tried in order) so minor header wording differences don't break it.
+// Returns -1 if none match.
+function colIndex(map: Map<string, number>, ...candidates: string[]): number {
+  for (const c of candidates) {
+    const idx = map.get(c.trim().toLowerCase());
+    if (idx !== undefined) return idx;
   }
+  return -1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // DOMAIN TYPES
 // ─────────────────────────────────────────────────────────────────────────
 
-// Fluke Products: A Item Code, B HSN, C Category, D Model, E Description,
-//                  F List Price, G Warranty, H MOQ
+// Fluke Products: A Item Code, B Make, C HSN, D Category, E Model,
+//                  F Description, G List Price, H Warranty, I MOQ
 export interface Product {
   row: number;
   itemCode: string;
+  make: string;
   hsn: string;
   category: string;
   model: string;
@@ -169,11 +182,15 @@ export interface Product {
   moq: number;
 }
 
-// Stock: A Item Code, B Model, C Description, D Location, E Opening Stock,
-//        F Ordered, G Received, H Sold, I Current Stock, J List Price
+// Stock sheet — column order is read dynamically from the header row (see
+// getHeaderMap/colIndex above), so this list is just documentation of the
+// fields the app expects to find by name, not their physical position:
+// Item Code, Make, Model, Description, Location, Opening Stock,
+// Ordered (In Transit), Received, Sold, Current Stock, List Price (₹)
 export interface StockRow {
   row: number;
   itemCode: string;
+  make: string;
   model: string;
   description: string;
   location: Location;
@@ -223,11 +240,48 @@ export interface Lot {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// SHEET MAINTENANCE
+// ─────────────────────────────────────────────────────────────────────────
+
+// Ensure "Fluke Lots" exists (auto-create on first use, per the agreed design).
+export async function ensureLotsSheet() {
+  const exists = await sheetExists(SHEETS.LOTS);
+  if (!exists) {
+    await createSheetWithHeader(SHEETS.LOTS, [
+      "Lot ID",
+      "Date",
+      "Item Code",
+      "Model",
+      "Location",
+      "Qty Purchased",
+      "Remaining Qty",
+      "Unit Purchase Price (₹)",
+      "Vendor",
+      "PO / Invoice No",
+    ]);
+  }
+}
+
+// Ensure "Transactions" has the new "Cost Price (₹)" column (col M).
+export async function ensureCostPriceColumn() {
+  const header = await readRange(`'${SHEETS.TRANSACTIONS}'!A1:M1`);
+  const row = header[0] ?? [];
+  if (!row[12] || String(row[12]).trim() === "") {
+    await batchUpdate([
+      {
+        range: `'${SHEETS.TRANSACTIONS}'!M1`,
+        values: [["Cost Price (₹)"]],
+      },
+    ]);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // FETCHERS
 // ─────────────────────────────────────────────────────────────────────────
 
 export async function fetchProducts(): Promise<Product[]> {
-  const rows = await readRange(`'${SHEETS.PRODUCTS}'!A${HEADER_ROW}:H5000`);
+  const rows = await readRange(`'${SHEETS.PRODUCTS}'!A${HEADER_ROW}:I5000`);
   if (rows.length <= 1) return [];
   const data = rows.slice(1);
   return data
@@ -235,34 +289,51 @@ export async function fetchProducts(): Promise<Product[]> {
     .map((r, i) => ({
       row: i + DATA_START_ROW,
       itemCode: String(r[0] ?? ""),
-      hsn: String(r[1] ?? ""),
-      category: String(r[2] ?? ""),
-      model: String(r[3] ?? ""),
-      description: String(r[4] ?? ""),
-      listPrice: Number(r[5] ?? 0),
-      warranty: String(r[6] ?? ""),
-      moq: Number(r[7] ?? 1),
+      make: String(r[1] ?? ""),
+      hsn: String(r[2] ?? ""),
+      category: String(r[3] ?? ""),
+      model: String(r[4] ?? ""),
+      description: String(r[5] ?? ""),
+      listPrice: Number(r[6] ?? 0),
+      warranty: String(r[7] ?? ""),
+      moq: Number(r[8] ?? 1),
     }));
 }
 
+// Reads the Stock sheet by HEADER NAME, not fixed position — see the
+// "HEADER-NAME-BASED COLUMN LOOKUP" block above for why.
 export async function fetchStock(): Promise<StockRow[]> {
-  const rows = await readRange(`'${SHEETS.STOCK}'!A${HEADER_ROW}:J5000`);
+  const headerMap = await getHeaderMap(SHEETS.STOCK);
+  const iItemCode = colIndex(headerMap, "Item Code");
+  const iMake = colIndex(headerMap, "Make");
+  const iModel = colIndex(headerMap, "Model");
+  const iDescription = colIndex(headerMap, "Description");
+  const iLocation = colIndex(headerMap, "Location");
+  const iOpening = colIndex(headerMap, "Opening Stock");
+  const iOrdered = colIndex(headerMap, "Ordered (In Transit)", "Ordered");
+  const iReceived = colIndex(headerMap, "Received");
+  const iSold = colIndex(headerMap, "Sold");
+  const iCurrent = colIndex(headerMap, "Current Stock");
+  const iListPrice = colIndex(headerMap, "List Price (₹)", "List Price");
+
+  const rows = await readRange(`'${SHEETS.STOCK}'!A${HEADER_ROW}:Z5000`);
   if (rows.length <= 1) return [];
   const data = rows.slice(1);
   return data
-    .filter((r) => r[0] && r[3]) // Item Code + Location present
+    .filter((r) => r[iItemCode] && (iLocation < 0 || r[iLocation])) // Item Code + Location present
     .map((r, i) => ({
       row: i + DATA_START_ROW,
-      itemCode: String(r[0] ?? ""),
-      model: String(r[1] ?? ""),
-      description: String(r[2] ?? ""),
-      location: String(r[3] ?? "") as Location,
-      openingStock: Number(r[4] ?? 0),
-      ordered: Number(r[5] ?? 0),
-      received: Number(r[6] ?? 0),
-      sold: Number(r[7] ?? 0),
-      currentStock: Number(r[8] ?? 0),
-      listPrice: Number(r[9] ?? 0),
+      itemCode: String(r[iItemCode] ?? ""),
+      make: iMake >= 0 ? String(r[iMake] ?? "") : "",
+      model: String(r[iModel] ?? ""),
+      description: String(r[iDescription] ?? ""),
+      location: String(r[iLocation] ?? "") as Location,
+      openingStock: Number(r[iOpening] ?? 0),
+      ordered: Number(r[iOrdered] ?? 0),
+      received: Number(r[iReceived] ?? 0),
+      sold: Number(r[iSold] ?? 0),
+      currentStock: Number(r[iCurrent] ?? 0),
+      listPrice: Number(r[iListPrice] ?? 0),
     }));
 }
 
@@ -348,6 +419,11 @@ export async function getNextLotId(): Promise<string> {
 
 // Find (or create) the Stock row for a given model+location and write
 // currentStock / received / sold back to it.
+//
+// Like fetchStock(), this resolves "Received" / "Sold" / "Current Stock"
+// columns BY HEADER NAME rather than hardcoded letters (G/H/I) — those
+// letters were only correct under the old 10-column layout and silently
+// became wrong once a column (e.g. "Make") was inserted into the sheet.
 export async function syncStockRow(
   itemCode: string,
   model: string,
@@ -357,6 +433,11 @@ export async function syncStockRow(
   deltaSold: number,
   newCurrentStock: number,
 ) {
+  const headerMap = await getHeaderMap(SHEETS.STOCK);
+  const iReceived = colIndex(headerMap, "Received");
+  const iSold = colIndex(headerMap, "Sold");
+  const iCurrent = colIndex(headerMap, "Current Stock");
+
   const stock = await fetchStock();
   const existing = stock.find(
     (s) => s.itemCode === itemCode && s.location === location,
@@ -365,33 +446,44 @@ export async function syncStockRow(
   if (existing) {
     const newReceived = existing.received + deltaReceived;
     const newSold = existing.sold + deltaSold;
-    // Column map: D=Location, E=Opening, F=Ordered, G=Received, H=Sold, I=Current Stock.
-    // Ordered (F) is intentionally left untouched here — it tracks in-transit
-    // POs, which this app doesn't manage yet.
     await batchUpdate([
-      { range: `'${SHEETS.STOCK}'!G${existing.row}`, values: [[newReceived]] },
-      { range: `'${SHEETS.STOCK}'!H${existing.row}`, values: [[newSold]] },
       {
-        range: `'${SHEETS.STOCK}'!I${existing.row}`,
+        range: `'${SHEETS.STOCK}'!${colLetter(iReceived + 1)}${existing.row}`,
+        values: [[newReceived]],
+      },
+      {
+        range: `'${SHEETS.STOCK}'!${colLetter(iSold + 1)}${existing.row}`,
+        values: [[newSold]],
+      },
+      {
+        range: `'${SHEETS.STOCK}'!${colLetter(iCurrent + 1)}${existing.row}`,
         values: [[newCurrentStock]],
       },
     ]);
   } else {
-    // First time this model+location combination appears — append a new row.
-    await appendRows(SHEETS.STOCK, "A:J", [
-      [
-        itemCode,
-        model,
-        description,
-        location,
-        0, // Opening Stock
-        0, // Ordered (in transit) — not tracked here
-        deltaReceived, // Received
-        deltaSold, // Sold
-        newCurrentStock, // Current Stock
-        "", // List Price left blank; Products sheet is the source for pricing
-      ],
-    ]);
+    // First time this model+location combination appears — append a new
+    // row, built in the sheet's ACTUAL column order (from the header row)
+    // rather than a hardcoded array, so it lands in the right cells no
+    // matter where "Make" or any other column sits. Note: "Make" itself
+    // isn't passed into this function today, so it's left blank on
+    // brand-new rows — acceptable since this path only fires once per
+    // model+location combo (normally already exists from initial setup).
+    const width = Math.max(...Array.from(headerMap.values())) + 1;
+    const row: unknown[] = new Array(width).fill("");
+    const set = (name: string, value: unknown) => {
+      const idx = colIndex(headerMap, name);
+      if (idx >= 0) row[idx] = value;
+    };
+    set("Item Code", itemCode);
+    set("Model", model);
+    set("Description", description);
+    set("Location", location);
+    set("Opening Stock", 0);
+    set("Ordered (In Transit)", 0);
+    set("Received", deltaReceived);
+    set("Sold", deltaSold);
+    set("Current Stock", newCurrentStock);
+    await appendRows(SHEETS.STOCK, `A:${colLetter(width)}`, [row]);
   }
 }
 

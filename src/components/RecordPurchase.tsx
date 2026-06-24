@@ -232,6 +232,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const [customTotalPrice, setCustomTotalPrice] = useState<number | "">("");
   const [courier, setCourier] = useState<number | "">(0);
   const [supplier, setSupplier] = useState("");
+  const [poNumber, setPoNumber] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -321,6 +322,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
           customFinalPrice: customFinal !== "" ? +customFinal : undefined,
           courierCharges: +(courier || 0),
           supplier,
+          poOrInvoice: poNumber,
         }),
       });
       const data = await res.json();
@@ -367,6 +369,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const handleNewPO = () => {
     setBatchLines([]);
     setSupplier("");
+    setPoNumber("");
     setInvoiceDate("");
     clearLineFields();
     setCourier(0);
@@ -668,14 +671,26 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
             />
           </FG>
           <FG
-            label="Supplier / PO reference"
+            label="Supplier / Vendor name"
             note={batchMode ? "sticky for this PO" : undefined}
           >
             <input
               type="text"
               value={supplier}
               onChange={(e) => setSupplier(e.target.value)}
-              placeholder="e.g. PO-2026-03 / Fluke direct"
+              placeholder="e.g. Shreyans Enterprises, CN Computers" // Changed
+            />
+          </FG>
+
+          <FG
+            label="PO / Invoice No"
+            note={batchMode ? "sticky for this PO" : undefined}
+          >
+            <input
+              type="text"
+              value={poNumber}
+              onChange={(e) => setPoNumber(e.target.value)}
+              placeholder="e.g. PO-2025-2026-035, No PO"
             />
           </FG>
         </div>
