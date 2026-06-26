@@ -1,27 +1,20 @@
 // src/lib/sheets.ts
 import { google } from "googleapis";
 
-// ─────────────────────────────────────────────────────────────────────────
-// SHEET NAMES — must match the actual Google Sheet exactly
-// ─────────────────────────────────────────────────────────────────────────
 export const SHEETS = {
   PRODUCTS: "Fluke Products",
   STOCK: "Stock",
   TRANSACTIONS: "Transactions",
   LOTS: "Fluke Lots",
-  PO_TRACKER: "PO Tracker", // not used by the app yet, left untouched
+  PO_TRACKER: "PO Tracker",
 };
 
 export const LOCATIONS = ["Kochi", "Bangalore"] as const;
 export type Location = (typeof LOCATIONS)[number];
 
-// All four real sheets use header row 1, data starting row 2.
 const HEADER_ROW = 1;
 const DATA_START_ROW = 2;
 
-// ─────────────────────────────────────────────────────────────────────────
-// AUTH / CLIENT
-// ─────────────────────────────────────────────────────────────────────────
 function getAuth() {
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const key = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n");
@@ -44,9 +37,6 @@ export function getSheetsClient() {
 
 export const SHEET_ID = process.env.GOOGLE_SHEET_ID!;
 
-// ─────────────────────────────────────────────────────────────────────────
-// GENERIC HELPERS
-// ─────────────────────────────────────────────────────────────────────────
 export async function readRange(range: string): Promise<string[][]> {
   const sheets = getSheetsClient();
   const res = await sheets.spreadsheets.values.get({
@@ -118,22 +108,6 @@ function colLetter(n: number): string {
   return s;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// HEADER-NAME-BASED COLUMN LOOKUP
-//
-// Why this exists: every read/write below used to assume a FIXED column
-// position (A=Item Code, B=Model, etc). The first time a column gets
-// inserted or reordered in the actual Google Sheet — e.g. adding "Make" —
-// every field after it silently shifts and starts reading/writing the
-// wrong data (no error, just wrong numbers). This happened with the Stock
-// sheet's "Make" column: List Price ended up reading what was actually
-// the Current Stock column.
-//
-// Fix: look up each field's column index by its HEADER TEXT (row 1) at
-// runtime, instead of hardcoding "column B is always Model". Inserting or
-// reordering columns in the sheet no longer breaks anything, as long as
-// the header text itself doesn't change.
-// ─────────────────────────────────────────────────────────────────────────
 const headerCache = new Map<string, Map<string, number>>();
 
 async function getHeaderMap(sheetName: string): Promise<Map<string, number>> {
@@ -152,9 +126,6 @@ async function getHeaderMap(sheetName: string): Promise<Map<string, number>> {
   return map;
 }
 
-// Looks up a column index by header text. Accepts multiple candidate names
-// (tried in order) so minor header wording differences don't break it.
-// Returns -1 if none match.
 function colIndex(map: Map<string, number>, ...candidates: string[]): number {
   for (const c of candidates) {
     const idx = map.get(c.trim().toLowerCase());
@@ -167,14 +138,18 @@ function colIndex(map: Map<string, number>, ...candidates: string[]): number {
 // DOMAIN TYPES
 // ─────────────────────────────────────────────────────────────────────────
 
-// Fluke Products: A Item Code, B Make, C HSN, D Category, E Model,
-//                  F Description, G List Price, H Warranty, I MOQ
+// Fluke Products sheet column order (current):
+//   A: Item Code  B: HSN Code  C: Category  D: Make  E: Model
+//   F: Description  G: List Price (₹)  H: Warranty  I: MOQ
+//
+// NOTE: Item Code (col A) is blank for most rows — filter on Model (col E)
+// instead, otherwise fetchProducts() returns an empty array.
 export interface Product {
   row: number;
   itemCode: string;
-  make: string;
   hsn: string;
   category: string;
+  make: string;
   model: string;
   description: string;
   listPrice: number;
@@ -182,11 +157,6 @@ export interface Product {
   moq: number;
 }
 
-// Stock sheet — column order is read dynamically from the header row (see
-// getHeaderMap/colIndex above), so this list is just documentation of the
-// fields the app expects to find by name, not their physical position:
-// Item Code, Make, Model, Description, Location, Opening Stock,
-// Ordered (In Transit), Received, Sold, Current Stock, List Price (₹)
 export interface StockRow {
   row: number;
   itemCode: string;
@@ -202,9 +172,6 @@ export interface StockRow {
   listPrice: number;
 }
 
-// Transactions: A TxnID, B Date, C Type, D ItemCode, E Model, F Location,
-//               G Qty, H UnitPrice, I Total, J Vendor/Customer, K PO/Invoice,
-//               L Status, M CostPrice (sale rows only)
 export interface Transaction {
   row: number;
   txnId: string;
@@ -216,15 +183,12 @@ export interface Transaction {
   qty: number;
   unitPrice: number;
   total: number;
-  party: string; // Vendor (purchase) or Customer (sale)
+  party: string;
   poOrInvoice: string;
   status: string;
-  costPrice: number | null; // only meaningful for Sale rows
+  costPrice: number | null;
 }
 
-// Fluke Lots: A LotID, B Date, C ItemCode, D Model, E Location,
-//             F QtyPurchased, G RemainingQty, H UnitPurchasePrice,
-//             I Vendor, J PO/Invoice
 export interface Lot {
   row: number;
   lotId: string;
@@ -243,7 +207,6 @@ export interface Lot {
 // SHEET MAINTENANCE
 // ─────────────────────────────────────────────────────────────────────────
 
-// Ensure "Fluke Lots" exists (auto-create on first use, per the agreed design).
 export async function ensureLotsSheet() {
   const exists = await sheetExists(SHEETS.LOTS);
   if (!exists) {
@@ -262,7 +225,6 @@ export async function ensureLotsSheet() {
   }
 }
 
-// Ensure "Transactions" has the new "Cost Price (₹)" column (col M).
 export async function ensureCostPriceColumn() {
   const header = await readRange(`'${SHEETS.TRANSACTIONS}'!A1:M1`);
   const row = header[0] ?? [];
@@ -284,24 +246,26 @@ export async function fetchProducts(): Promise<Product[]> {
   const rows = await readRange(`'${SHEETS.PRODUCTS}'!A${HEADER_ROW}:I5000`);
   if (rows.length <= 1) return [];
   const data = rows.slice(1);
-  return data
-    .filter((r) => r[0]) // Item Code present
-    .map((r, i) => ({
-      row: i + DATA_START_ROW,
-      itemCode: String(r[0] ?? ""),
-      make: String(r[1] ?? ""),
-      hsn: String(r[2] ?? ""),
-      category: String(r[3] ?? ""),
-      model: String(r[4] ?? ""),
-      description: String(r[5] ?? ""),
-      listPrice: Number(r[6] ?? 0),
-      warranty: String(r[7] ?? ""),
-      moq: Number(r[8] ?? 1),
-    }));
+  return (
+    data
+      // Filter on Model (col E, index 4) — Item Code (col A) is blank for most rows
+      // and would incorrectly filter out the entire catalogue.
+      .filter((r) => r[4])
+      .map((r, i) => ({
+        row: i + DATA_START_ROW,
+        itemCode: String(r[0] ?? ""), // col A: Item Code
+        hsn: String(r[1] ?? ""), // col B: HSN Code
+        category: String(r[2] ?? ""), // col C: Category
+        make: String(r[3] ?? ""), // col D: Make
+        model: String(r[4] ?? ""), // col E: Model
+        description: String(r[5] ?? ""), // col F: Description
+        listPrice: Number(r[6] ?? 0), // col G: List Price (₹)
+        warranty: String(r[7] ?? ""), // col H: Warranty
+        moq: Number(r[8] ?? 1), // col I: MOQ
+      }))
+  );
 }
 
-// Reads the Stock sheet by HEADER NAME, not fixed position — see the
-// "HEADER-NAME-BASED COLUMN LOOKUP" block above for why.
 export async function fetchStock(): Promise<StockRow[]> {
   const headerMap = await getHeaderMap(SHEETS.STOCK);
   const iItemCode = colIndex(headerMap, "Item Code");
@@ -320,7 +284,7 @@ export async function fetchStock(): Promise<StockRow[]> {
   if (rows.length <= 1) return [];
   const data = rows.slice(1);
   return data
-    .filter((r) => r[iItemCode] && (iLocation < 0 || r[iLocation])) // Item Code + Location present
+    .filter((r) => r[iItemCode] && (iLocation < 0 || r[iLocation]))
     .map((r, i) => ({
       row: i + DATA_START_ROW,
       itemCode: String(r[iItemCode] ?? ""),
@@ -344,7 +308,7 @@ export async function fetchTransactions(): Promise<Transaction[]> {
   if (rows.length <= 1) return [];
   const data = rows.slice(1);
   return data
-    .filter((r) => r[0]) // Txn ID present
+    .filter((r) => r[0])
     .map((r, i) => ({
       row: i + DATA_START_ROW,
       txnId: String(r[0] ?? ""),
@@ -369,7 +333,7 @@ export async function fetchLots(): Promise<Lot[]> {
   if (rows.length <= 1) return [];
   const data = rows.slice(1);
   return data
-    .filter((r) => r[0]) // Lot ID present
+    .filter((r) => r[0])
     .map((r, i) => ({
       row: i + DATA_START_ROW,
       lotId: String(r[0] ?? ""),
@@ -414,16 +378,9 @@ export async function getNextLotId(): Promise<string> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// STOCK ROLLUP (Stock sheet's Current Stock is derived from open lots)
+// STOCK ROLLUP
 // ─────────────────────────────────────────────────────────────────────────
 
-// Find (or create) the Stock row for a given model+location and write
-// currentStock / received / sold back to it.
-//
-// Like fetchStock(), this resolves "Received" / "Sold" / "Current Stock"
-// columns BY HEADER NAME rather than hardcoded letters (G/H/I) — those
-// letters were only correct under the old 10-column layout and silently
-// became wrong once a column (e.g. "Make") was inserted into the sheet.
 export async function syncStockRow(
   itemCode: string,
   model: string,
@@ -461,13 +418,6 @@ export async function syncStockRow(
       },
     ]);
   } else {
-    // First time this model+location combination appears — append a new
-    // row, built in the sheet's ACTUAL column order (from the header row)
-    // rather than a hardcoded array, so it lands in the right cells no
-    // matter where "Make" or any other column sits. Note: "Make" itself
-    // isn't passed into this function today, so it's left blank on
-    // brand-new rows — acceptable since this path only fires once per
-    // model+location combo (normally already exists from initial setup).
     const width = Math.max(...Array.from(headerMap.values())) + 1;
     const row: unknown[] = new Array(width).fill("");
     const set = (name: string, value: unknown) => {
@@ -491,7 +441,6 @@ export async function syncStockRow(
 // FIFO ENGINE
 // ─────────────────────────────────────────────────────────────────────────
 
-// Create a new lot from a purchase. Returns the created lot's id.
 export async function createLot(params: {
   date: string;
   itemCode: string;
@@ -512,7 +461,7 @@ export async function createLot(params: {
       params.model,
       params.location,
       params.qty,
-      params.qty, // remaining = full qty initially
+      params.qty,
       params.unitPurchasePrice,
       params.vendor,
       params.poOrInvoice,
@@ -521,10 +470,6 @@ export async function createLot(params: {
   return lotId;
 }
 
-// Consume `qty` units FIFO (oldest lot first) for a given model+location.
-// Returns the weighted-average cost price for the consumed units, plus
-// the per-lot consumption breakdown (for traceability if ever needed).
-// Throws if there isn't enough stock across open lots.
 export async function consumeFifo(
   itemCode: string,
   location: Location,
@@ -541,7 +486,6 @@ export async function consumeFifo(
         l.location === location &&
         l.remainingQty > 0,
     )
-    // FIFO = oldest date first; fall back to lot id order if dates tie/missing
     .sort((a, b) => {
       const da = new Date(a.date).getTime();
       const db = new Date(b.date).getTime();
@@ -569,12 +513,10 @@ export async function consumeFifo(
     if (remainingToConsume <= 0) break;
     const take = Math.min(lot.remainingQty, remainingToConsume);
     const newRemaining = lot.remainingQty - take;
-
     updates.push({
       range: `'${SHEETS.LOTS}'!G${lot.row}`,
       values: [[newRemaining]],
     });
-
     totalCost += take * lot.unitPurchasePrice;
     breakdown.push({
       lotId: lot.lotId,
@@ -585,13 +527,10 @@ export async function consumeFifo(
   }
 
   await batchUpdate(updates);
-
   const weightedCost = totalCost / qty;
   return { weightedCost, breakdown };
 }
 
-// Restore qty back into lots (used when reversing/undoing a sale — not
-// currently exposed via an API route, but kept here for completeness).
 export async function restoreFifo(
   breakdown: Array<{ lotId: string; qtyTaken: number }>,
 ) {

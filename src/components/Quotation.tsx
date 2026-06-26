@@ -8,6 +8,10 @@ interface Props {
 }
 interface LineItem {
   desc: string;
+  make: string;
+  productDescription: string;
+  hsnCode: string;
+  warranty: string;
   qty: number;
   rate: number;
   disc: number;
@@ -41,8 +45,9 @@ function fmtDate(val: string) {
 
 // ─────────────────────────────────────────────────────────────────────────
 // Searchable product combobox for a quotation line item.
-// Searches model, category, AND item code. Selecting a product auto-fills
-// the List Rate. Free typing still works for custom line items.
+// Searches model, category, make, AND item code. Selecting a product
+// auto-fills List Rate, Make, HSN Code, Warranty, MOQ, and stock status.
+// Free typing still works for custom line items.
 //
 // The dropdown panel is rendered via a portal into document.body with
 // position:fixed, anchored to the input's live bounding rect. This is
@@ -79,14 +84,37 @@ function LineItemCombobox({
     setQuery(value);
   }, [value]);
 
+  // Debug: log the first product so we can verify field names match
+  useEffect(() => {
+    if (products.length > 0) {
+      console.log("[Quotation] products[0] keys:", Object.keys(products[0]));
+      console.log("[Quotation] products[0] sample:", products[0]);
+      console.log("[Quotation] total products:", products.length);
+    } else {
+      console.warn("[Quotation] products array is empty!");
+    }
+  }, [products]);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return products;
     return products.filter((p) => {
-      const model = (p.model || "").toLowerCase();
-      const cat = (p.category || "").toLowerCase();
-      const code = String(p.itemCode || "").toLowerCase();
-      return model.includes(q) || cat.includes(q) || code.includes(q);
+      // Use String() on every field — Model is stored as a number (101.0) in
+      // the Excel, so calling .toLowerCase() directly on it would throw.
+      const model = String(p.model ?? p.Model ?? "").toLowerCase();
+      const cat = String(p.category ?? p.Category ?? "").toLowerCase();
+      const make = String(p.make ?? p.Make ?? "").toLowerCase();
+      const code = String(
+        p.itemCode ?? p["Item Code"] ?? p.item_code ?? "",
+      ).toLowerCase();
+      const desc = String(p.description ?? p.Description ?? "").toLowerCase();
+      return (
+        model.includes(q) ||
+        cat.includes(q) ||
+        make.includes(q) ||
+        code.includes(q) ||
+        desc.includes(q)
+      );
     });
   }, [products, query]);
 
@@ -94,7 +122,6 @@ function LineItemCombobox({
     setHighlight(0);
   }, [query, open]);
 
-  // Recompute the input's on-screen position so the portal can anchor to it.
   const updatePosition = () => {
     const el = inputRef.current;
     if (!el) return;
@@ -102,10 +129,6 @@ function LineItemCombobox({
     setPos({ top: r.bottom + 4, left: r.left, width: r.width });
   };
 
-  // 'scroll' events don't bubble, but a capturing listener on window still
-  // fires for scrolls on any nested scrollable ancestor (e.g. the table's
-  // overflowX wrapper) because capture happens on the way down to the
-  // target, regardless of bubbling.
   useEffect(() => {
     if (!open) return;
     updatePosition();
@@ -117,9 +140,6 @@ function LineItemCombobox({
     };
   }, [open]);
 
-  // Click-outside needs to check both the input wrapper AND the portaled
-  // dropdown, since the dropdown now lives in document.body, not inside
-  // wrapRef.
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       const target = e.target as Node;
@@ -166,12 +186,12 @@ function LineItemCombobox({
               position: "fixed",
               top: pos.top,
               left: pos.left,
-              width: Math.max(pos.width, 280),
+              width: Math.max(pos.width, 320),
               zIndex: 1000,
               background: "var(--bg-input)",
               border: "1px solid var(--border)",
               borderRadius: 8,
-              maxHeight: 260,
+              maxHeight: 280,
               overflowY: "auto",
               boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
             }}
@@ -189,7 +209,7 @@ function LineItemCombobox({
             ) : (
               filtered.map((p, i) => (
                 <div
-                  key={p.model}
+                  key={`${p.itemCode || ""}-${p.model}`}
                   onMouseDown={(e) => {
                     e.preventDefault();
                     choose(p);
@@ -201,26 +221,78 @@ function LineItemCombobox({
                     cursor: "pointer",
                     background:
                       i === highlight ? "rgba(59,130,246,0.15)" : "transparent",
-                    color: i === highlight ? "var(--text)" : "var(--text-dim)",
-                    display: "flex",
-                    justifyContent: "space-between",
-                    gap: 8,
+                    borderBottom: "1px solid var(--border)",
                   }}
                 >
-                  <span style={{ fontWeight: 500, color: "var(--text)" }}>
-                    {p.model}
-                    {p.category ? (
+                  {/* Row 1: make + model + category badge */}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <span style={{ fontWeight: 600, color: "var(--text)" }}>
+                      {p.make ? (
+                        <span
+                          style={{
+                            color: "var(--text-muted)",
+                            fontWeight: 400,
+                            marginRight: 4,
+                          }}
+                        >
+                          {p.make}
+                        </span>
+                      ) : null}
+                      {p.model}
+                    </span>
+                    {p.category && (
                       <span
-                        style={{ color: "var(--text-muted)", fontWeight: 400 }}
+                        style={{
+                          fontSize: 10,
+                          color: "var(--text-muted)",
+                          background: "rgba(99,102,241,0.1)",
+                          border: "1px solid rgba(99,102,241,0.2)",
+                          borderRadius: 4,
+                          padding: "1px 6px",
+                          flexShrink: 0,
+                        }}
                       >
-                        {" "}
-                        ({p.category})
+                        {p.category}
                       </span>
-                    ) : null}
-                  </span>
-                  <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>
-                    {p.itemCode} · ₹{(p.listPrice || 0).toLocaleString("en-IN")}
-                  </span>
+                    )}
+                  </div>
+                  {/* Row 2: description + price + item code */}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      marginTop: 2,
+                      gap: 8,
+                    }}
+                  >
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        flex: 1,
+                      }}
+                    >
+                      {p.description || ""}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-dim)",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {p.itemCode ? `${p.itemCode} · ` : ""}₹
+                      {(p.listPrice || 0).toLocaleString("en-IN")}
+                      {p.moq && p.moq > 1 ? ` · MOQ ${p.moq}` : ""}
+                    </span>
+                  </div>
                 </div>
               ))
             )}
@@ -235,7 +307,7 @@ function LineItemCombobox({
         ref={inputRef}
         type="text"
         value={query}
-        placeholder="Search model, category, item code… or type custom item"
+        placeholder="Search model, make, category, item code… or type custom"
         onChange={(e) => {
           setQuery(e.target.value);
           onTextChange(e.target.value);
@@ -261,6 +333,10 @@ export default function Quotation({ products }: Props) {
   const [lines, setLines] = useState<LineItem[]>([
     {
       desc: "",
+      make: "",
+      productDescription: "",
+      hsnCode: "",
+      warranty: "",
       qty: 1,
       rate: 0,
       disc: 0,
@@ -277,6 +353,10 @@ export default function Quotation({ products }: Props) {
       ...prev,
       {
         desc: "",
+        make: "",
+        productDescription: "",
+        hsnCode: "",
+        warranty: "",
         qty: 1,
         rate: 0,
         disc: 0,
@@ -291,6 +371,12 @@ export default function Quotation({ products }: Props) {
       prev.map((l, idx) => (idx === i ? { ...l, [key]: val } : l)),
     );
 
+  // Bulk-update multiple fields at once (used on product select)
+  const setLineFields = (i: number, patch: Partial<LineItem>) =>
+    setLines((prev) =>
+      prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l)),
+    );
+
   const sub = useMemo(
     () => lines.reduce((s, l) => s + l.qty * l.rate * (1 - l.disc / 100), 0),
     [lines],
@@ -299,13 +385,6 @@ export default function Quotation({ products }: Props) {
   const total = sub + gstAmt;
 
   // ── Opening message ───────────────────────────────────────────────────
-  // Default greeting is auto-generated from customer name + the line-item
-  // discounts. It auto-detects a single uniform discount % across all
-  // discounted lines (e.g. "22%") and mentions it directly; if discounts
-  // vary across lines, it falls back to a generic mention rather than
-  // guessing a number. Once the user edits the textarea, auto-regeneration
-  // stops (introEdited = true) so their wording is never silently
-  // overwritten — "Reset to default" brings the auto-text back.
   const defaultIntro = useMemo(() => {
     const salutation = cname ? `Dear ${cname},` : "Dear Sir/Madam,";
     const discountedLines = lines.filter((l) => l.disc > 0);
@@ -340,13 +419,19 @@ export default function Quotation({ products }: Props) {
               const lineTotal = unitAfterDisc * l.qty;
               const rows = [];
               rows.push(`  ${i + 1}.  ${l.desc || "Unnamed item"}`);
+              if (l.productDescription)
+                rows.push(`      Description    :  ${l.productDescription}`);
+              if (l.make) rows.push(`      Make           :  ${l.make}`);
+              if (l.hsnCode) rows.push(`      HSN Code       :  ${l.hsnCode}`);
               rows.push(`      List price     :  ₹${fmtInt(l.rate)}`);
               if (l.disc > 0) {
                 rows.push(`      Discount       :  ${l.disc}%`);
-                rows.push(`      Price after disc :  ₹${fmt(unitAfterDisc)}`);
+                rows.push(`      Price after disc:  ₹${fmt(unitAfterDisc)}`);
               }
               rows.push(`      Qty            :  ${l.qty}`);
               rows.push(`      Line total     :  ₹${fmt(lineTotal)}`);
+              if (l.warranty)
+                rows.push(`      Warranty       :  ${l.warranty}`);
               rows.push(
                 `      Availability   :  ${l.instock ? "✓ In stock" : "✕ Not in stock"}`,
               );
@@ -477,18 +562,20 @@ export default function Quotation({ products }: Props) {
             borderRadius: 8,
           }}
         >
-          <table style={{ minWidth: 780 }}>
+          <table style={{ minWidth: 900 }}>
             <thead>
               <tr>
                 <th style={{ width: 24 }}>#</th>
-                <th style={{ minWidth: 130 }}>Product / Model</th>
-                <th style={{ width: 60 }}>Qty</th>
+                <th style={{ minWidth: 150 }}>Product / Model</th>
+                <th style={{ width: 80 }}>Make</th>
+                <th style={{ width: 75 }}>HSN Code</th>
+                <th style={{ width: 55 }}>Qty</th>
                 <th style={{ width: 95 }}>List Rate (₹)</th>
-                <th style={{ width: 78 }}>Disc %</th>
+                <th style={{ width: 68 }}>Disc %</th>
                 <th style={{ width: 95 }}>After Disc (₹)</th>
                 <th style={{ width: 95 }}>Line Total (₹)</th>
                 <th style={{ width: 105 }}>Availability</th>
-                <th style={{ width: 115 }}>Delivery / Lead time</th>
+                <th style={{ width: 110 }}>Delivery / Lead time</th>
                 <th style={{ width: 28 }}></th>
               </tr>
             </thead>
@@ -507,9 +594,56 @@ export default function Quotation({ products }: Props) {
                         value={l.desc}
                         onTextChange={(text) => setLine(i, "desc", text)}
                         onSelect={(p) => {
-                          setLine(i, "desc", p.model);
-                          setLine(i, "rate", p.listPrice || 0);
+                          // Determine stock status from currentStock if available
+                          const instock =
+                            p.currentStock !== undefined
+                              ? p.currentStock > 0
+                              : true;
+                          setLineFields(i, {
+                            desc: p.model,
+                            make: p.make || "",
+                            productDescription: p.description || "",
+                            hsnCode: p.hsn || p.hsnCode || "", // sheets.ts exposes as .hsn
+                            warranty: p.warranty
+                              ? String(p.warranty) +
+                                (typeof p.warranty === "number"
+                                  ? " year" + (p.warranty === 1 ? "" : "s")
+                                  : "")
+                              : "",
+                            rate: p.listPrice || 0,
+                            qty: p.moq && Number(p.moq) > 1 ? Number(p.moq) : 1,
+                            instock,
+                          });
                         }}
+                      />
+                      {/* Show product description as a subtle sub-line */}
+                      {l.productDescription && (
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: "var(--text-muted)",
+                            marginTop: 2,
+                            paddingLeft: 2,
+                          }}
+                        >
+                          {l.productDescription}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        value={l.make}
+                        placeholder="Make"
+                        onChange={(e) => setLine(i, "make", e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        type="text"
+                        value={l.hsnCode}
+                        placeholder="HSN"
+                        onChange={(e) => setLine(i, "hsnCode", e.target.value)}
                       />
                     </td>
                     <td>
@@ -687,7 +821,7 @@ export default function Quotation({ products }: Props) {
         </div>
       </div>
 
-      {/* Opening message — default-generated, fully editable */}
+      {/* Opening message */}
       <div style={card}>
         <div
           style={{

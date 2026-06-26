@@ -10,9 +10,17 @@ export async function GET() {
       fetchProducts(),
     ]);
 
-    const productMap = new Map(products.map((p) => [p.itemCode, p]));
+    // Dual lookup: by itemCode (primary) AND by model (fallback).
+    // Most Fluke Products rows have blank itemCode, so itemCode-only lookup
+    // returns nothing and category/listPrice end up blank.
+    const productByItemCode = new Map(
+      products.filter((p) => p.itemCode).map((p) => [p.itemCode, p]),
+    );
+    const productByModel = new Map(products.map((p) => [p.model, p]));
 
-    // Sort lots oldest-first so last write wins = most recent known price
+    const getProduct = (itemCode: string, model: string) =>
+      productByItemCode.get(itemCode) ?? productByModel.get(model);
+
     const sortedLots = [...lots].sort((a, b) => {
       const da = new Date(a.date).getTime();
       const db = new Date(b.date).getTime();
@@ -20,11 +28,6 @@ export async function GET() {
       return a.lotId.localeCompare(b.lotId);
     });
 
-    // Last known non-zero unit price per itemCode across ALL lots
-    // (open or closed). Used as fallback when:
-    //   (a) open lots exist but have a blank/zero price, or
-    //   (b) no open lots exist at all (lot fully consumed but stock
-    //       sheet still shows units — data inconsistency scenario)
     const lastKnownPrice = new Map<string, number>();
     for (const l of sortedLots) {
       if (l.unitPurchasePrice > 0) {
@@ -32,8 +35,6 @@ export async function GET() {
       }
     }
 
-    // FIFO weighted-average cost per itemCode+location from open lots.
-    // Falls back to lastKnownPrice when a lot price is blank/zero.
     const costMap = new Map<string, number>();
     for (const loc of ["Kochi", "Bangalore"]) {
       const itemCodes = [...new Set(lots.map((l) => l.itemCode))];
@@ -41,12 +42,8 @@ export async function GET() {
         const openLots = lots.filter(
           (l) => l.itemCode === ic && l.location === loc && l.remainingQty > 0,
         );
-
         const fallback = lastKnownPrice.get(ic) ?? 0;
-
         if (openLots.length > 0) {
-          // Has open lots — compute weighted average, substituting
-          // fallback price for any lot with a blank/zero price
           const totalQty = openLots.reduce((s, l) => s + l.remainingQty, 0);
           const totalVal = openLots.reduce((s, l) => {
             const price =
@@ -57,17 +54,13 @@ export async function GET() {
             costMap.set(`${ic}__${loc}`, totalVal / totalQty);
           }
         } else if (fallback > 0) {
-          // No open lots but stock sheet may still show units
-          // (lot fully consumed but stock not yet decremented, or
-          // pre-FIFO opening stock). Use last known price so stock
-          // value isn't silently zeroed out.
           costMap.set(`${ic}__${loc}`, fallback);
         }
       }
     }
 
     const enriched = stock.map((s) => {
-      const prod = productMap.get(s.itemCode);
+      const prod = getProduct(s.itemCode, s.model);
       const costPrice = costMap.get(`${s.itemCode}__${s.location}`) ?? 0;
       return {
         ...s,
