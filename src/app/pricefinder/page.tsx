@@ -643,19 +643,6 @@ export default function PriceFinderPage() {
               </div>
             </div>
 
-            {fifo > 0 && (
-              <div className={`pf-margin-row ${profitable ? "good" : "bad"}`}>
-                <div>
-                  <div className="pf-margin-label">Your margin</div>
-                  <div className="pf-margin-amount">
-                    {profitable ? "+" : ""}
-                    {fmt(margin)} / unit
-                  </div>
-                </div>
-                <div className="pf-margin-pct">{marginPct.toFixed(1)}%</div>
-              </div>
-            )}
-
             {selectedModel && (
               <div className="pf-stock-row">
                 <div className="pf-stock-pill">
