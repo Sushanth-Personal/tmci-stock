@@ -1,28 +1,17 @@
 // src/app/api/invoices/[id]/dispatch/route.ts
 //
-// PATCH /api/invoices/<uuid>/dispatch
+// PATCH — dispatch an invoice
+//   1. FIFO consumption from Supabase `lots` table
+//   2. Update Supabase `stock` table (current_stock, sold)
+//   3. Insert rows into Supabase `transactions` table
+//   4. Mark invoice as dispatched in Supabase `sale_invoices`
 //
-// This is the moment stock gets deducted.
-// For each line item in the invoice:
-//   1. consumeFifo(itemCode, location, qty)  → deducts from oldest lots
-//   2. syncStockRow(...)                     → updates Stock rollup sheet
-//   3. appendRows(SHEETS.TRANSACTIONS, ...)  → logs a Sale transaction row
-// Then marks the invoice status = "dispatched" in Supabase.
+// Zero Google Sheets dependency — Supabase is the source of truth.
 //
-// If ANY step fails the API returns an error — partial states are possible
-// on network failures so the UI should reload and show current state before retrying.
+// DELETE — cancel a pending invoice (no stock was touched, no reversal needed)
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import {
-  fetchProducts,
-  fetchStock,
-  getNextTxnId,
-  consumeFifo,
-  syncStockRow,
-  appendRows,
-  SHEETS,
-} from "@/lib/sheets";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL;
@@ -32,66 +21,188 @@ function getSupabase() {
   return createClient(url, key);
 }
 
+// ─── FIFO consumption (Supabase lots table) ───────────────────────────────────
+async function consumeFifoSupabase(
+  supabase: ReturnType<typeof getSupabase>,
+  model: string,
+  location: string,
+  qty: number,
+): Promise<{
+  weightedCost: number;
+  breakdown: Array<{ lotId: string; qtyTaken: number; unitPrice: number }>;
+}> {
+  // Fetch open lots for this model+location, oldest first
+  const { data: lots, error } = await supabase
+    .from("lots")
+    .select("lot_id, date, remaining_qty, unit_purchase_price")
+    .eq("model", model)
+    .eq("location", location)
+    .gt("remaining_qty", 0)
+    .order("date", { ascending: true })
+    .order("lot_id", { ascending: true });
+
+  if (error) throw new Error(`Lots fetch failed: ${error.message}`);
+  if (!lots || lots.length === 0)
+    throw new Error(`No open lots for ${model} in ${location}`);
+
+  const totalAvailable = lots.reduce(
+    (s: number, l: any) => s + l.remaining_qty,
+    0,
+  );
+  if (totalAvailable < qty) {
+    throw new Error(
+      `Insufficient stock for ${model} in ${location}. Available: ${totalAvailable}, required: ${qty}`,
+    );
+  }
+
+  let remaining = qty;
+  let totalCost = 0;
+  const breakdown: Array<{
+    lotId: string;
+    qtyTaken: number;
+    unitPrice: number;
+  }> = [];
+
+  for (const lot of lots) {
+    if (remaining <= 0) break;
+    const take = Math.min(lot.remaining_qty, remaining);
+    const newRemaining = lot.remaining_qty - take;
+
+    // Update this lot's remaining_qty in Supabase
+    const { error: updateErr } = await supabase
+      .from("lots")
+      .update({ remaining_qty: newRemaining })
+      .eq("lot_id", lot.lot_id);
+
+    if (updateErr)
+      throw new Error(
+        `Failed to update lot ${lot.lot_id}: ${updateErr.message}`,
+      );
+
+    totalCost += take * lot.unit_purchase_price;
+    breakdown.push({
+      lotId: lot.lot_id,
+      qtyTaken: take,
+      unitPrice: lot.unit_purchase_price,
+    });
+    remaining -= take;
+  }
+
+  return { weightedCost: totalCost / qty, breakdown };
+}
+
+// ─── Stock update (Supabase stock table) ─────────────────────────────────────
+async function updateStockSupabase(
+  supabase: ReturnType<typeof getSupabase>,
+  model: string,
+  location: string,
+  qtySold: number,
+) {
+  // Get current stock row
+  const { data: stockRow, error: fetchErr } = await supabase
+    .from("stock")
+    .select("id, current_stock, sold")
+    .eq("model", model)
+    .eq("location", location)
+    .single();
+
+  if (fetchErr || !stockRow) {
+    // Stock row might not exist for this model+location — log but don't fail dispatch
+    console.warn(
+      `Stock row not found for ${model} @ ${location} — skipping stock update`,
+    );
+    return;
+  }
+
+  const { error: updateErr } = await supabase
+    .from("stock")
+    .update({
+      current_stock: Math.max(0, (stockRow.current_stock || 0) - qtySold),
+      sold: (stockRow.sold || 0) + qtySold,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", stockRow.id);
+
+  if (updateErr)
+    throw new Error(`Stock update failed for ${model}: ${updateErr.message}`);
+}
+
+// ─── Transaction logging (Supabase transactions table) ───────────────────────
+async function getNextTxnId(
+  supabase: ReturnType<typeof getSupabase>,
+): Promise<string> {
+  const { data } = await supabase
+    .from("transactions")
+    .select("txn_id")
+    .like("txn_id", "TXN-%")
+    .order("txn_id", { ascending: false })
+    .limit(1);
+
+  const last = data?.[0]?.txn_id ?? "TXN-0000";
+  const num = parseInt(last.replace("TXN-", ""), 10) || 0;
+  return `TXN-${String(num + 1).padStart(4, "0")}`;
+}
+
+// ─── PATCH — dispatch ─────────────────────────────────────────────────────────
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params;
+    const body = await req.json().catch(() => ({}));
     const supabase = getSupabase();
 
-    // 1. Load invoice from Supabase
+    // 1. Load invoice
     const { data: invoice, error: fetchErr } = await supabase
       .from("sale_invoices")
       .select("*")
       .eq("id", id)
       .single();
 
-    if (fetchErr || !invoice) {
+    if (fetchErr || !invoice)
       return NextResponse.json({ error: "Invoice not found" }, { status: 404 });
-    }
-
-    if (invoice.status === "dispatched") {
+    if (invoice.status === "dispatched")
       return NextResponse.json(
-        { error: "Invoice already dispatched" },
+        { error: "Already dispatched" },
         { status: 409 },
       );
-    }
-
-    if (invoice.status === "cancelled") {
+    if (invoice.status === "cancelled")
       return NextResponse.json(
         { error: "Cannot dispatch a cancelled invoice" },
         { status: 409 },
       );
-    }
 
-    const lineItems: Array<{
-      model: string;
-      itemCode: string;
-      hsn: string;
-      qty: number;
-      unitSalePrice: number;
-      discount: number;
-      serialNumbers: string[];
-    }> = invoice.line_items;
-
-    if (!lineItems?.length) {
+    const lineItems: any[] = invoice.line_items ?? [];
+    if (!lineItems.length)
       return NextResponse.json(
         { error: "Invoice has no line items" },
         { status: 400 },
       );
-    }
 
-    const products = await fetchProducts();
-    const stock = await fetchStock();
     const location = invoice.location;
+    const customerName =
+      invoice.customer_snapshot?.display_name ||
+      invoice.customer_snapshot?.name ||
+      invoice.customer_snapshot?.companyName ||
+      "";
+    const dispatchedAt = body.dispatched_at
+      ? new Date(body.dispatched_at).toISOString()
+      : new Date().toISOString();
 
-    // 2. Pre-flight: check stock availability for all lines before touching anything
+    // 2. Pre-flight: verify stock availability for all lines before touching anything
     for (const line of lineItems) {
-      const stockRows = stock.filter(
-        (s) => s.itemCode === line.itemCode && s.location === location,
+      const { data: lots } = await supabase
+        .from("lots")
+        .select("remaining_qty")
+        .eq("model", line.model)
+        .eq("location", location)
+        .gt("remaining_qty", 0);
+
+      const available = (lots ?? []).reduce(
+        (s: number, l: any) => s + l.remaining_qty,
+        0,
       );
-      const available = stockRows.reduce((s, r) => s + r.currentStock, 0);
       if (available < line.qty) {
         return NextResponse.json(
           {
@@ -103,127 +214,84 @@ export async function PATCH(
     }
 
     // 3. Process each line item
-    const txnResults: Array<{
-      model: string;
-      txnId: string;
-      costPrice: number;
-      margin: number;
-    }> = [];
-
-    // Reload stock fresh before processing (avoid stale values between lines)
-    let currentStock = await fetchStock();
-    const customerName =
-      invoice.customer_snapshot?.name ??
-      invoice.customer_snapshot?.companyName ??
-      "";
-
+    const txnResults = [];
     for (const line of lineItems) {
-      const product = products.find(
-        (p) => p.itemCode === line.itemCode || p.model === line.model,
-      );
-      if (!product) {
-        return NextResponse.json(
-          { error: `Product not found: ${line.model}` },
-          { status: 404 },
-        );
-      }
-
-      // FIFO consumption
-      const fifoResult = await consumeFifo(
-        product.itemCode,
-        location,
-        line.qty,
-      );
-
-      // Effective unit sale price after discount
       const effectiveUnitPrice =
         line.unitSalePrice * (1 - (line.discount ?? 0) / 100);
       const lineTotal = effectiveUnitPrice * line.qty;
-      const txnId = await getNextTxnId();
-      const costPrice = +fifoResult.weightedCost.toFixed(2);
-      const margin =
-        effectiveUnitPrice > 0
-          ? ((effectiveUnitPrice - costPrice) / effectiveUnitPrice) * 100
-          : 0;
 
-      // Log transaction row — include invoice number in poOrInvoice field
-      await appendRows(SHEETS.TRANSACTIONS, "A:M", [
-        [
-          txnId,
-          invoice.invoice_date,
-          "Sale",
-          product.itemCode,
-          line.model,
-          location,
-          line.qty,
-          effectiveUnitPrice,
-          lineTotal,
-          customerName,
-          invoice.invoice_number,
-          "Dispatched",
-          costPrice,
-        ],
-      ]);
-
-      // Update Stock rollup
-      const existingStockRow = currentStock.find(
-        (s) => s.itemCode === product.itemCode && s.location === location,
-      );
-      const newCurrentStock = (existingStockRow?.currentStock ?? 0) - line.qty;
-
-      await syncStockRow(
-        product.itemCode,
+      // FIFO consumption from Supabase lots
+      const fifoResult = await consumeFifoSupabase(
+        supabase,
         line.model,
-        product.description,
-        location as "Kochi" | "Bangalore",
-        0,
+        location,
         line.qty,
-        newCurrentStock,
       );
+      const costPrice = +fifoResult.weightedCost.toFixed(2);
 
-      // Update local stock snapshot so next line sees updated numbers
-      currentStock = await fetchStock();
+      // Update stock in Supabase
+      await updateStockSupabase(supabase, line.model, location, line.qty);
 
-      txnResults.push({ model: line.model, txnId, costPrice, margin });
+      // Log transaction to Supabase transactions table
+      const txnId = await getNextTxnId(supabase);
+      const { error: txnErr } = await supabase.from("transactions").insert({
+        txn_id: txnId,
+        date: invoice.invoice_date,
+        type: "Sale",
+        item_code: line.itemCode || line.model,
+        model: line.model,
+        location: location,
+        qty: line.qty,
+        unit_price: effectiveUnitPrice,
+        total: lineTotal,
+        party: customerName,
+        po_invoice: invoice.invoice_number,
+        status: "Dispatched",
+        cost_price: costPrice,
+        invoice_date: invoice.invoice_date,
+      });
+      if (txnErr)
+        throw new Error(`Transaction insert failed: ${txnErr.message}`);
+
+      txnResults.push({
+        model: line.model,
+        txnId,
+        costPrice,
+        margin:
+          effectiveUnitPrice > 0
+            ? ((effectiveUnitPrice - costPrice) / effectiveUnitPrice) * 100
+            : 0,
+      });
     }
 
-    // 4. Log each charge as a "Charges" transaction row in Google Sheets.
-    //    These rows carry no itemCode/model and do not touch FIFO lots or stock.
-    //    They exist purely for P&L visibility in the Transactions sheet.
-    const charges: Array<{ label: string; amount: number }> =
-      invoice.charges ?? [];
-
+    // 4. Log charges as transactions (no stock impact)
+    const charges: any[] = invoice.charges ?? [];
     for (const charge of charges) {
       if (!charge.amount || charge.amount <= 0) continue;
-      const chargeTxnId = await getNextTxnId();
-      const chargeGst = +(charge.amount * (invoice.gst_rate / 100)).toFixed(2);
-      const chargeTotal = +(charge.amount + chargeGst).toFixed(2);
-
-      await appendRows(SHEETS.TRANSACTIONS, "A:M", [
-        [
-          chargeTxnId,
-          invoice.invoice_date,
-          "Charges", // Type = Charges (distinct from Sale)
-          "", // itemCode — not applicable
-          charge.label, // model column repurposed as charge label
-          location,
-          1, // qty = 1 (lump-sum charge)
-          charge.amount, // unit price = charge amount ex-GST
-          chargeTotal, // total incl. GST
-          customerName,
-          invoice.invoice_number,
-          "Dispatched",
-          "", // costPrice — not applicable
-        ],
-      ]);
+      const chargeTxnId = await getNextTxnId(supabase);
+      await supabase.from("transactions").insert({
+        txn_id: chargeTxnId,
+        date: invoice.invoice_date,
+        type: "Charges",
+        item_code: "",
+        model: charge.label,
+        location: location,
+        qty: 1,
+        unit_price: charge.amount,
+        total: +(charge.amount * (1 + invoice.gst_rate / 100)).toFixed(2),
+        party: customerName,
+        po_invoice: invoice.invoice_number,
+        status: "Dispatched",
+        cost_price: null,
+      });
     }
 
-    // 5. Mark invoice as dispatched in Supabase
+    // 5. Mark invoice as dispatched
     const { error: updateErr } = await supabase
       .from("sale_invoices")
       .update({
         status: "dispatched",
-        dispatched_at: new Date().toISOString(),
+        dispatched_at: dispatchedAt,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id);
@@ -242,7 +310,7 @@ export async function PATCH(
   }
 }
 
-// PATCH /api/invoices/<uuid>/dispatch?action=cancel — cancel instead
+// ─── DELETE — cancel invoice ──────────────────────────────────────────────────
 export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -257,24 +325,20 @@ export async function DELETE(
       .eq("id", id)
       .single();
 
-    if (fetchErr || !invoice) {
+    if (fetchErr || !invoice)
       return NextResponse.json({ error: "Invoice not found" }, { status: 404 });
-    }
-
-    if (invoice.status === "dispatched") {
+    if (invoice.status === "dispatched")
       return NextResponse.json(
         { error: "Cannot cancel an already-dispatched invoice" },
         { status: 409 },
       );
-    }
 
-    const { error: updateErr } = await supabase
+    const { error } = await supabase
       .from("sale_invoices")
       .update({ status: "cancelled", updated_at: new Date().toISOString() })
       .eq("id", id);
 
-    if (updateErr) throw updateErr;
-
+    if (error) throw error;
     return NextResponse.json({ success: true });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";

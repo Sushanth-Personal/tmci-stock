@@ -9,14 +9,20 @@ const NAV: Array<{
 }> = [
   { id: "dashboard", label: "Dashboard", icon: "▦", section: "Overview" },
   { id: "stock", label: "Stock View", icon: "≡" },
-  { id: "sale", label: "Record Sale", icon: "⊕", section: "Transactions" },
-  { id: "purchase", label: "Record Purchase", icon: "↓" },
-  { id: "transfer", label: "Stock Transfer", icon: "⇄" },
+  { id: "sale", label: "Record Sale", icon: "⊕", section: "Sales" },
+  { id: "invoices", label: "Invoices", icon: "📋" },
+  { id: "purchase", label: "Record Purchase", icon: "↓", section: "Purchases" },
+  {
+    id: "transfer",
+    label: "Stock Transfer",
+    icon: "⇄",
+    section: "Transactions",
+  },
   { id: "quotation", label: "Quotation", icon: "📄" },
-  { id: "transactions", label: "Transaction History", icon: "🕘" },
+  { id: "transactions", label: "Ledger", icon: "📒" },
   { id: "additem", label: "Add New Item", icon: "+", section: "Catalogue" },
+  { id: "customers", label: "Customers", icon: "👥" },
   { id: "downloads", label: "Downloads", icon: "↧", section: "Reports" },
-  { id: "customers", label: "Customers", icon: "👥", section: "Catalogue" },
 ];
 
 export default function Sidebar({
@@ -39,7 +45,6 @@ export default function Sidebar({
         height: "100%",
       }}
     >
-      {/* Logo */}
       <div style={{ padding: "14px", borderBottom: "1px solid var(--border)" }}>
         <div style={{ fontWeight: 600, fontSize: 13, color: "var(--text)" }}>
           TMCI Stock
@@ -48,8 +53,6 @@ export default function Sidebar({
           Fluke Products · Live Sheet
         </div>
       </div>
-
-      {/* Nav */}
       <div style={{ flex: 1, overflowY: "auto", padding: "6px 0" }}>
         {NAV.map((item) => (
           <div key={item.id}>

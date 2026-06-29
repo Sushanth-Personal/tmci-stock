@@ -1,73 +1,111 @@
 // src/app/api/stock/route.ts
+// Reads stock + lots + products from Supabase (not Google Sheets)
+// This ensures dispatched invoices immediately reflect in stock view.
+
 import { NextResponse } from "next/server";
-import { fetchStock, fetchLots, fetchProducts } from "@/lib/sheets";
+import { createClient } from "@supabase/supabase-js";
+
+function getSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key)
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key);
+}
 
 export async function GET() {
   try {
-    const [stock, lots, products] = await Promise.all([
-      fetchStock(),
-      fetchLots(),
-      fetchProducts(),
+    const supabase = getSupabase();
+
+    // Fetch all three tables in parallel
+    const [stockRes, lotsRes, productsRes] = await Promise.all([
+      supabase.from("stock").select("*"),
+      supabase.from("lots").select("*"),
+      supabase.from("products").select("*"),
     ]);
 
-    // Dual lookup: by itemCode (primary) AND by model (fallback).
-    // Most Fluke Products rows have blank itemCode, so itemCode-only lookup
-    // returns nothing and category/listPrice end up blank.
+    if (stockRes.error) throw stockRes.error;
+    if (lotsRes.error) throw lotsRes.error;
+    if (productsRes.error) throw productsRes.error;
+
+    const stock = stockRes.data ?? [];
+    const lots = lotsRes.data ?? [];
+    const products = productsRes.data ?? [];
+
+    // Build product lookup by model (primary) and item_code (fallback)
+    const productByModel = new Map(products.map((p: any) => [p.model, p]));
     const productByItemCode = new Map(
-      products.filter((p) => p.itemCode).map((p) => [p.itemCode, p]),
+      products
+        .filter((p: any) => p.item_code)
+        .map((p: any) => [p.item_code, p]),
     );
-    const productByModel = new Map(products.map((p) => [p.model, p]));
-
     const getProduct = (itemCode: string, model: string) =>
-      productByItemCode.get(itemCode) ?? productByModel.get(model);
+      productByModel.get(model) ?? productByItemCode.get(itemCode);
 
-    const sortedLots = [...lots].sort((a, b) => {
+    // Sort lots oldest first for FIFO cost calculation
+    const sortedLots = [...lots].sort((a: any, b: any) => {
       const da = new Date(a.date).getTime();
       const db = new Date(b.date).getTime();
       if (!isNaN(da) && !isNaN(db) && da !== db) return da - db;
-      return a.lotId.localeCompare(b.lotId);
+      return (a.lot_id ?? "").localeCompare(b.lot_id ?? "");
     });
 
+    // Last known purchase price per model (fallback when no open lots)
     const lastKnownPrice = new Map<string, number>();
     for (const l of sortedLots) {
-      if (l.unitPurchasePrice > 0) {
-        lastKnownPrice.set(l.itemCode, l.unitPurchasePrice);
-      }
+      if (l.unit_purchase_price > 0)
+        lastKnownPrice.set(l.model, l.unit_purchase_price);
     }
 
+    // Weighted average cost per (model, location) from open lots
     const costMap = new Map<string, number>();
-    for (const loc of ["Kochi", "Bangalore"]) {
-      const itemCodes = [...new Set(lots.map((l) => l.itemCode))];
-      for (const ic of itemCodes) {
-        const openLots = lots.filter(
-          (l) => l.itemCode === ic && l.location === loc && l.remainingQty > 0,
+    const modelLocSet = new Set(
+      lots.map((l: any) => `${l.model}__${l.location}`),
+    );
+    for (const key of modelLocSet) {
+      const [model, loc] = key.split("__");
+      const openLots = lots.filter(
+        (l: any) =>
+          l.model === model && l.location === loc && l.remaining_qty > 0,
+      );
+      const fallback = lastKnownPrice.get(model) ?? 0;
+      if (openLots.length > 0) {
+        const totalQty = openLots.reduce(
+          (s: number, l: any) => s + l.remaining_qty,
+          0,
         );
-        const fallback = lastKnownPrice.get(ic) ?? 0;
-        if (openLots.length > 0) {
-          const totalQty = openLots.reduce((s, l) => s + l.remainingQty, 0);
-          const totalVal = openLots.reduce((s, l) => {
-            const price =
-              l.unitPurchasePrice > 0 ? l.unitPurchasePrice : fallback;
-            return s + l.remainingQty * price;
-          }, 0);
-          if (totalQty > 0 && totalVal > 0) {
-            costMap.set(`${ic}__${loc}`, totalVal / totalQty);
-          }
-        } else if (fallback > 0) {
-          costMap.set(`${ic}__${loc}`, fallback);
-        }
+        const totalVal = openLots.reduce((s: number, l: any) => {
+          const price =
+            l.unit_purchase_price > 0 ? l.unit_purchase_price : fallback;
+          return s + l.remaining_qty * price;
+        }, 0);
+        if (totalQty > 0) costMap.set(key, totalVal / totalQty);
+      } else if (fallback > 0) {
+        costMap.set(key, fallback);
       }
     }
 
-    const enriched = stock.map((s) => {
-      const prod = getProduct(s.itemCode, s.model);
-      const costPrice = costMap.get(`${s.itemCode}__${s.location}`) ?? 0;
+    // Enrich stock rows
+    const enriched = stock.map((s: any) => {
+      const prod = getProduct(s.item_code ?? "", s.model);
+      const costPrice = costMap.get(`${s.model}__${s.location}`) ?? 0;
       return {
-        ...s,
+        // Normalise to camelCase so StockView.tsx doesn't need changes
+        row: 0,
+        itemCode: s.item_code ?? "",
+        make: s.make ?? prod?.make ?? "",
+        model: s.model,
+        description: s.description ?? prod?.description ?? "",
+        location: s.location,
         category: prod?.category ?? "",
-        listPrice: prod?.listPrice ?? s.listPrice,
+        openingStock: s.opening_stock ?? 0,
+        ordered: s.ordered ?? 0,
+        received: s.received ?? 0,
+        sold: s.sold ?? 0,
+        currentStock: s.current_stock ?? 0,
+        listPrice: s.list_price ?? prod?.list_price ?? 0,
         costPrice,
-        stockValue: s.currentStock * costPrice,
+        stockValue: (s.current_stock ?? 0) * costPrice,
       };
     });
 

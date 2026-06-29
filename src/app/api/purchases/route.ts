@@ -1,7 +1,10 @@
 // src/app/api/purchases/route.ts
+// Reads from Supabase transactions table instead of Google Sheets
+// POST still writes to Google Sheets (RecordPurchase screen) — keep that working
+
 import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 import {
-  fetchTransactions,
   fetchProducts,
   getNextTxnId,
   createLot,
@@ -11,11 +14,43 @@ import {
   SHEETS,
 } from "@/lib/sheets";
 
-// GET: return all Purchase-type rows from Transactions
+function getSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key)
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key);
+}
+
+// GET — read from Supabase
 export async function GET() {
   try {
-    const all = await fetchTransactions();
-    const purchases = all.filter((t) => t.type === "Purchase");
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("type", "Purchase")
+      .order("date", { ascending: false })
+      .limit(500);
+
+    if (error) throw error;
+
+    const purchases = (data ?? []).map((r: any) => ({
+      txnId: r.txn_id,
+      date: r.date,
+      type: r.type,
+      itemCode: r.item_code ?? "",
+      model: r.model,
+      location: r.location,
+      qty: r.qty,
+      unitPrice: r.unit_price,
+      total: r.total,
+      party: r.party,
+      poOrInvoice: r.po_invoice,
+      status: r.status,
+      costPrice: r.cost_price ?? null,
+    }));
+
     return NextResponse.json({ purchases });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -23,11 +58,7 @@ export async function GET() {
   }
 }
 
-// POST: record a purchase.
-// Frontend (RecordPurchase.tsx) sends:
-//   date, invoiceDate, model, location, qtyPurchased, unitListPrice,
-//   baseDiscount, addDiscount, customFinalPrice, courierCharges, supplier
-// Older callers may send qty / unitPurchasePrice / vendor directly — both forms accepted.
+// POST — record a new purchase (writes to Supabase lots + stock + transactions)
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -37,25 +68,21 @@ export async function POST(req: Request) {
       model,
       location,
       qtyPurchased,
-      qty, // legacy / direct callers
+      qty,
       unitListPrice,
       baseDiscount,
       addDiscount,
       customFinalPrice,
-      unitPurchasePrice, // legacy / direct callers
+      unitPurchasePrice,
       courierCharges,
-      courier, // alternative field name
+      courier,
       supplier,
-      vendor, // legacy / direct callers
+      vendor,
       poOrInvoice,
       status,
     } = body;
 
     const resolvedQty = Number(qtyPurchased ?? qty ?? 0);
-
-    // Derive the effective unit purchase price:
-    // list × (1 − base%) × (1 − add%), then override with customFinalPrice if set.
-    // Falls back to a directly-supplied unitPurchasePrice for legacy callers.
     const afterBase =
       Number(unitListPrice ?? 0) * (1 - Number(baseDiscount ?? 0) / 100);
     const afterAdd = afterBase * (1 - Number(addDiscount ?? 0) / 100);
@@ -64,12 +91,9 @@ export async function POST(req: Request) {
       : unitPurchasePrice
         ? Number(unitPurchasePrice)
         : afterAdd;
-
-    // Effective cost includes courier spread across this line's qty
     const resolvedCourier = Number(courierCharges ?? courier ?? 0);
     const courierPerUnit = resolvedQty > 0 ? resolvedCourier / resolvedQty : 0;
     const effectiveCostPerUnit = resolvedUnitPrice + courierPerUnit;
-
     const resolvedVendor = supplier ?? vendor ?? "";
 
     if (!model || !location || !resolvedQty || !resolvedUnitPrice) {
@@ -92,9 +116,7 @@ export async function POST(req: Request) {
     const total = resolvedQty * resolvedUnitPrice + resolvedCourier;
     const txnId = await getNextTxnId();
 
-    // 1. Log the transaction
-    // Col M (index 12) = Cost Price — not applicable to purchases, left blank.
-    // Col N (index 13) = Invoice Date — stored for reference.
+    // 1. Log to Google Sheets transactions (keeps Sheets in sync for backups)
     await appendRows(SHEETS.TRANSACTIONS, "A:N", [
       [
         txnId,
@@ -109,12 +131,12 @@ export async function POST(req: Request) {
         resolvedVendor,
         poOrInvoice ?? "",
         status ?? "Received",
-        "", // Cost Price — not applicable to purchases
-        invoiceDate ?? "", // Invoice Date
+        "",
+        invoiceDate ?? "",
       ],
     ]);
 
-    // 2. Create the FIFO lot (cost basis = unit purchase price, no courier)
+    // 2. Create FIFO lot in Google Sheets
     const lotId = await createLot({
       date: txnDate,
       itemCode: product.itemCode,
@@ -126,7 +148,7 @@ export async function POST(req: Request) {
       poOrInvoice: poOrInvoice ?? "",
     });
 
-    // 3. Update Stock rollup
+    // 3. Update Stock in Google Sheets
     const stock = await fetchStock();
     const existing = stock.find(
       (s) => s.itemCode === product.itemCode && s.location === location,
@@ -137,9 +159,51 @@ export async function POST(req: Request) {
       model,
       product.description,
       location,
-      resolvedQty, // deltaReceived
-      0, // deltaSold
+      resolvedQty,
+      0,
       newCurrentStock,
+    );
+
+    // 4. Also write to Supabase transactions + lots + stock
+    const supabase = getSupabase();
+
+    await supabase.from("transactions").insert({
+      txn_id: txnId,
+      date: txnDate,
+      type: "Purchase",
+      item_code: product.itemCode,
+      model,
+      location,
+      qty: resolvedQty,
+      unit_price: resolvedUnitPrice,
+      total,
+      party: resolvedVendor,
+      po_invoice: poOrInvoice ?? "",
+      status: status ?? "Received",
+      cost_price: resolvedUnitPrice,
+    });
+
+    await supabase.from("lots").insert({
+      lot_id: lotId,
+      date: txnDate,
+      model,
+      location,
+      qty_purchased: resolvedQty,
+      remaining_qty: resolvedQty,
+      unit_purchase_price: resolvedUnitPrice,
+      vendor: resolvedVendor,
+      po_invoice: poOrInvoice ?? "",
+    });
+
+    await supabase.from("stock").upsert(
+      {
+        model,
+        location,
+        received: newCurrentStock,
+        current_stock: newCurrentStock,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "model,location" },
     );
 
     return NextResponse.json({

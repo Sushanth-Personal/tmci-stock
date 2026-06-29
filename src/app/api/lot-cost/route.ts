@@ -1,8 +1,4 @@
 // src/app/api/lot-cost/route.ts
-//
-// GET /api/lot-cost?model=101&location=Kochi
-// Returns the oldest open FIFO lot for a model+location from Supabase.
-// Used by the Price Finder to show the real purchase cost.
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";

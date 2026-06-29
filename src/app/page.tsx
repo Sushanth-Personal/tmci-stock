@@ -8,15 +8,18 @@ import RecordPurchase from "@/components/RecordPurchase";
 import StockTransfer from "@/components/StockTransfer";
 import AddItem from "@/components/AddItem";
 import Downloads from "@/components/Downloads";
-import Transactions from "@/components/Transactions";
+import Ledger from "@/components/Ledger";
 import Quotation from "@/components/Quotation";
 import Customers from "@/components/Customers";
+import Invoices from "@/components/Invoices";
 import PriceFinder from "@/components/PriceFinder";
 import PendingInvoices from "@/components/PendingInvoices";
+
 export type Screen =
   | "dashboard"
   | "stock"
   | "sale"
+  | "invoices"
   | "purchase"
   | "transfer"
   | "additem"
@@ -29,10 +32,11 @@ const TITLES: Record<Screen, string> = {
   dashboard: "Dashboard",
   stock: "Stock View",
   sale: "Record Sale",
+  invoices: "Invoices",
   purchase: "Record Purchase",
   transfer: "Stock Transfer",
   additem: "Add New Item",
-  transactions: "Transaction History",
+  transactions: "Ledger",
   quotation: "Quotation",
   downloads: "Downloads & Reports",
   customers: "Customers",
@@ -72,25 +76,13 @@ export default function Home() {
     refreshSales();
     refreshPurchases();
   }, [refreshProducts, refreshSales, refreshPurchases]);
+
   const refresh = () => {
     refreshProducts();
     refreshSales();
     refreshPurchases();
   };
 
-  // Native <input type="date"> only opens the calendar dropdown when you
-  // click the small icon on the right — clicking anywhere else in the
-  // field just drops a text cursor into a date segment, which feels
-  // broken next to every other clickable-anywhere control in the app.
-  // This delegates clicks on ANY date input, anywhere in the app, to
-  // showPicker() so the whole field behaves like a single button.
-  // One listener at the root covers every screen — no need to repeat
-  // this in each component that has a date field.
-  //
-  // showPicker() is newer (Chrome/Edge 99+, Safari 16.4+) and isn't in
-  // older TS DOM lib typings, so it's accessed via an optional cast
-  // rather than assumed to exist. Browsers without it (older Firefox)
-  // simply keep the old "click the icon" behavior — nothing breaks.
   useEffect(() => {
     const handleDateInputClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
@@ -99,16 +91,11 @@ export default function Home() {
         target.tagName === "INPUT" &&
         (target as HTMLInputElement).type === "date"
       ) {
-        const input = target as HTMLInputElement & {
-          showPicker?: () => void;
-        };
+        const input = target as HTMLInputElement & { showPicker?: () => void };
         if (typeof input.showPicker === "function") {
           try {
             input.showPicker();
-          } catch {
-            // Ignore — e.g. picker already open, or a browser quirk
-            // around calling showPicker() outside a direct user gesture.
-          }
+          } catch {}
         }
       }
     };
@@ -131,22 +118,9 @@ export default function Home() {
         .sidebar-backdrop { display: none; }
         @media (max-width: 860px) {
           .mobile-menu-btn { display: inline-flex !important; }
-          .app-sidebar {
-            position: fixed;
-            inset: 0 auto 0 0;
-            z-index: 50;
-            transform: translateX(-100%);
-            transition: transform 0.2s ease;
-            width: 220px !important;
-          }
+          .app-sidebar { position: fixed; inset: 0 auto 0 0; z-index: 50; transform: translateX(-100%); transition: transform 0.2s ease; width: 220px !important; }
           .app-sidebar.open { transform: translateX(0); }
-          .sidebar-backdrop.open {
-            display: block;
-            position: fixed;
-            inset: 0;
-            background: rgba(0,0,0,0.5);
-            z-index: 40;
-          }
+          .sidebar-backdrop.open { display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 40; }
           .app-main-header { padding: 10px 12px !important; }
           .app-main-body { padding: 12px !important; }
           .app-header-title { font-size: 13px !important; }
@@ -171,6 +145,7 @@ export default function Home() {
           minWidth: 0,
         }}
       >
+        {/* Header */}
         <div
           className="app-main-header"
           style={{
@@ -243,13 +218,14 @@ export default function Home() {
             </span>
           </div>
         </div>
+
+        {/* Body */}
         <div
           className="app-main-body"
           style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}
         >
           {screen === "dashboard" && (
             <>
-              <PriceFinder products={products} /> {/* ← add this */}
               <PendingInvoices onStockChanged={refresh} />
               <Dashboard
                 products={products}
@@ -264,10 +240,11 @@ export default function Home() {
               products={products}
               onSuccess={() => {
                 refresh();
-                setScreen("stock");
+                setScreen("invoices");
               }}
             />
           )}
+          {screen === "invoices" && <Invoices onStockChanged={refresh} />}
           {screen === "purchase" && (
             <RecordPurchase
               products={products}
@@ -295,7 +272,7 @@ export default function Home() {
             />
           )}
           {screen === "transactions" && (
-            <Transactions sales={sales} purchases={purchases} />
+            <Ledger sales={sales} purchases={purchases} />
           )}
           {screen === "quotation" && <Quotation products={products} />}
           {screen === "downloads" && (
