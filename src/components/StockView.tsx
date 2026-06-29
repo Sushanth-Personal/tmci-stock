@@ -74,16 +74,20 @@ export default function StockView({ products: _ }: { products: any[] }) {
     return Array.from(s).sort();
   }, [stock]);
 
+  // PATCH: replace the rows useMemo in src/components/StockView.tsx
+  // Change: composite key uses model+location instead of make|itemCode
+  // itemCode is blank for most products so the old key collapsed all rows into one
+
   const rows = useMemo((): DisplayRow[] => {
     const map = new Map<string, DisplayRow>();
     for (const s of stock) {
-      // Composite key: itemCode alone isn't guaranteed unique across makes
-      // (e.g. a non-Fluke line could reuse a numeric code).
-      const key = `${s.make}|${s.itemCode}`;
+      // ── KEY FIX: key on model+location, NOT make|itemCode ─────────────────
+      // itemCode is blank for most rows; model is always populated.
+      const key = `${s.model}|${s.location}`;
       if (!map.has(key)) {
         map.set(key, {
           key,
-          itemCode: s.itemCode,
+          itemCode: s.itemCode, // kept for display; may be blank
           make: s.make,
           model: s.model,
           description: s.description,

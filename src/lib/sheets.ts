@@ -266,38 +266,43 @@ export async function fetchProducts(): Promise<Product[]> {
   );
 }
 
+
+
 export async function fetchStock(): Promise<StockRow[]> {
   const headerMap = await getHeaderMap(SHEETS.STOCK);
   const iItemCode = colIndex(headerMap, "Item Code");
-  const iMake = colIndex(headerMap, "Make");
-  const iModel = colIndex(headerMap, "Model");
+  const iMake     = colIndex(headerMap, "Make");
+  const iModel    = colIndex(headerMap, "Model");
   const iDescription = colIndex(headerMap, "Description");
   const iLocation = colIndex(headerMap, "Location");
-  const iOpening = colIndex(headerMap, "Opening Stock");
-  const iOrdered = colIndex(headerMap, "Ordered (In Transit)", "Ordered");
+  const iOpening  = colIndex(headerMap, "Opening Stock");
+  const iOrdered  = colIndex(headerMap, "Ordered (In Transit)", "Ordered");
   const iReceived = colIndex(headerMap, "Received");
-  const iSold = colIndex(headerMap, "Sold");
-  const iCurrent = colIndex(headerMap, "Current Stock");
+  const iSold     = colIndex(headerMap, "Sold");
+  const iCurrent  = colIndex(headerMap, "Current Stock");
   const iListPrice = colIndex(headerMap, "List Price (₹)", "List Price");
 
   const rows = await readRange(`'${SHEETS.STOCK}'!A${HEADER_ROW}:Z5000`);
   if (rows.length <= 1) return [];
   const data = rows.slice(1);
+
   return data
-    .filter((r) => r[iItemCode] && (iLocation < 0 || r[iLocation]))
+    // ── KEY FIX: filter on model, NOT itemCode ──────────────────────────────
+    // itemCode is blank for most rows; model is always populated.
+    .filter((r) => r[iModel] && (iLocation < 0 || r[iLocation]))
     .map((r, i) => ({
-      row: i + DATA_START_ROW,
-      itemCode: String(r[iItemCode] ?? ""),
-      make: iMake >= 0 ? String(r[iMake] ?? "") : "",
-      model: String(r[iModel] ?? ""),
-      description: String(r[iDescription] ?? ""),
-      location: String(r[iLocation] ?? "") as Location,
-      openingStock: Number(r[iOpening] ?? 0),
-      ordered: Number(r[iOrdered] ?? 0),
-      received: Number(r[iReceived] ?? 0),
-      sold: Number(r[iSold] ?? 0),
-      currentStock: Number(r[iCurrent] ?? 0),
-      listPrice: Number(r[iListPrice] ?? 0),
+      row:          i + DATA_START_ROW,
+      itemCode:     String(r[iItemCode] ?? ""),   // may be blank — that's fine
+      make:         iMake >= 0 ? String(r[iMake] ?? "") : "",
+      model:        String(r[iModel] ?? ""),
+      description:  String(r[iDescription] ?? ""),
+      location:     String(r[iLocation] ?? "") as Location,
+      openingStock: Number(r[iOpening]  ?? 0),
+      ordered:      Number(r[iOrdered]  ?? 0),
+      received:     Number(r[iReceived] ?? 0),
+      sold:         Number(r[iSold]     ?? 0),
+      currentStock: Number(r[iCurrent]  ?? 0),
+      listPrice:    Number(r[iListPrice] ?? 0),
     }));
 }
 

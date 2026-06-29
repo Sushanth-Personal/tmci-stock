@@ -16,6 +16,7 @@ const NAV: Array<{
   { id: "transactions", label: "Transaction History", icon: "🕘" },
   { id: "additem", label: "Add New Item", icon: "+", section: "Catalogue" },
   { id: "downloads", label: "Downloads", icon: "↧", section: "Reports" },
+  { id: "customers", label: "Customers", icon: "👥", section: "Catalogue" },
 ];
 
 export default function Sidebar({

@@ -10,7 +10,9 @@ import AddItem from "@/components/AddItem";
 import Downloads from "@/components/Downloads";
 import Transactions from "@/components/Transactions";
 import Quotation from "@/components/Quotation";
-
+import Customers from "@/components/Customers";
+import PriceFinder from "@/components/PriceFinder";
+import PendingInvoices from "@/components/PendingInvoices";
 export type Screen =
   | "dashboard"
   | "stock"
@@ -20,7 +22,8 @@ export type Screen =
   | "additem"
   | "transactions"
   | "quotation"
-  | "downloads";
+  | "downloads"
+  | "customers";
 
 const TITLES: Record<Screen, string> = {
   dashboard: "Dashboard",
@@ -32,6 +35,7 @@ const TITLES: Record<Screen, string> = {
   transactions: "Transaction History",
   quotation: "Quotation",
   downloads: "Downloads & Reports",
+  customers: "Customers",
 };
 
 export default function Home() {
@@ -217,6 +221,7 @@ export default function Home() {
               flexShrink: 0,
             }}
           >
+            <PriceFinder products={products} />
             <button
               className="btn-ghost"
               style={{ fontSize: 11, padding: "4px 10px" }}
@@ -243,11 +248,15 @@ export default function Home() {
           style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}
         >
           {screen === "dashboard" && (
-            <Dashboard
-              products={products}
-              sales={sales}
-              purchases={purchases}
-            />
+            <>
+              <PriceFinder products={products} /> {/* ← add this */}
+              <PendingInvoices onStockChanged={refresh} />
+              <Dashboard
+                products={products}
+                sales={sales}
+                purchases={purchases}
+              />
+            </>
           )}
           {screen === "stock" && <StockView products={products} />}
           {screen === "sale" && (
@@ -296,6 +305,7 @@ export default function Home() {
               purchases={purchases}
             />
           )}
+          {screen === "customers" && <Customers />}
         </div>
       </div>
     </div>

@@ -326,7 +326,7 @@ export default function Quotation({ products }: Props) {
   const validTill = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
     .toISOString()
     .split("T")[0];
-  const [qnum, setQnum] = useState("Quote/26-27/KL/001");
+  const [qnum, setQnum] = useState("Quote/26/27/KL/001");
   const [qdate, setQdate] = useState(today);
   const [qvalid, setQvalid] = useState(validTill);
   const [cname, setCname] = useState("");
