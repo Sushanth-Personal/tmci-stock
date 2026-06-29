@@ -215,7 +215,7 @@ export default function PriceFinder({ products }: Props) {
           .pf-panel {
             top: 0; right: 0; left: 0; bottom: 0;
             width: 100vw; max-width: 100vw;
-            height: 100vh; max-height: 100vh;
+            height: 100dvh; max-height: 100dvh;
             border-radius: 0; border: none;
           }
           :root { --pf-backdrop-display: none; }
@@ -267,9 +267,6 @@ export default function PriceFinder({ products }: Props) {
               padding: "14px 16px",
               borderBottom: "1px solid var(--border)",
               background: "var(--bg-card)",
-              position: "sticky",
-              top: 0,
-              zIndex: 10,
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
