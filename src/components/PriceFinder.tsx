@@ -184,6 +184,8 @@ export default function PriceFinder({ products }: Props) {
         .pf-lot { font-size:11px; padding:7px 10px; border-radius:7px; margin-top:10px;
           background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.25);
           display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+        /* iOS zoom fix: inputs must be >= 16px to prevent autozoom on focus */
+        .pf-panel input, .pf-panel select { font-size: 16px !important; }
         @media(max-width:860px){
           .pf-row { grid-template-columns:1fr 1fr; }
           :root { --pf-backdrop-display: none; }
