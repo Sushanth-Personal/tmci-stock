@@ -6,6 +6,7 @@ interface Props {
 }
 
 const DISCS = [22, 25, 28, 30];
+const GST = 18;
 const fmt = (n: number) => "₹" + Math.round(n).toLocaleString("en-IN");
 const fmtD = (s: string) =>
   new Date(s).toLocaleDateString("en-IN", {
@@ -18,15 +19,13 @@ export default function PriceFinder({ products }: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [listPrice, setListPrice] = useState<number | "">("");
-  const [disc, setDisc] = useState<number | "">(30);
-  const [activeDisc, setActiveDisc] = useState<number | null>(30);
-  const [gst, setGst] = useState(18);
+  const [disc, setDisc] = useState<number | "">(22);
+  const [activeDisc, setActiveDisc] = useState<number | null>(22);
   const [dropOpen, setDropOpen] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
   const [dsState, setDsState] = useState<"idle" | "loading" | "none">("idle");
   const [lot, setLot] = useState<any>(null);
   const [lotLoading, setLotLoading] = useState(false);
-  const [location, setLocation] = useState("Kochi");
   const inputRef = useRef<HTMLInputElement>(null);
   const touchStartX = useRef<number | null>(null);
 
@@ -58,15 +57,21 @@ export default function PriceFinder({ products }: Props) {
       .slice(0, 8);
   }, [products, query]);
 
-  const fetchLot = async (model: string, loc: string) => {
+  const fetchLot = async (model: string) => {
     setLotLoading(true);
     setLot(null);
     try {
-      const r = await fetch(
-        `/api/lot-cost?model=${encodeURIComponent(model)}&location=${encodeURIComponent(loc)}`,
-      );
-      const d = await r.json();
-      setLot(d);
+      // Fetch both locations in parallel
+      const [rK, rB] = await Promise.all([
+        fetch(
+          `/api/lot-cost?model=${encodeURIComponent(model)}&location=Kochi`,
+        ),
+        fetch(
+          `/api/lot-cost?model=${encodeURIComponent(model)}&location=Bangalore`,
+        ),
+      ]);
+      const [dK, dB] = await Promise.all([rK.json(), rB.json()]);
+      setLot({ kochi: dK, bangalore: dB });
     } catch {}
     setLotLoading(false);
   };
@@ -77,13 +82,8 @@ export default function PriceFinder({ products }: Props) {
     setListPrice(p.listPrice ?? "");
     setDropOpen(false);
     setDsState("idle");
-    fetchLot(p.model, location);
+    fetchLot(p.model);
   };
-
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (selectedModel) fetchLot(selectedModel, location);
-  }, [location]);
 
   const reset = () => {
     setQuery("");
@@ -113,94 +113,124 @@ export default function PriceFinder({ products }: Props) {
     }
   };
 
-  // ── Calculations ───────────────────────────────────────────────────────────
+  // Calculations
   const lp = +(listPrice || 0);
   const d = +(disc || 0);
-
-  // Your real cost from FIFO lot
-  const yourCost = lot?.found ? lot.fifoPrice : 0;
-
-  // What % off list you actually paid — e.g. cost ₹2972 on list ₹4600 = 35.4% off
-  const purchaseDiscPct =
-    lp > 0 && yourCost > 0 ? ((lp - yourCost) / lp) * 100 : 0;
-
-  // What customer pays
+  const fifoK = lot?.kochi?.found ? lot.kochi.fifoPrice : 0;
+  const fifoB = lot?.bangalore?.found ? lot.bangalore.fifoPrice : 0;
+  const fifo = fifoK || fifoB || 0; // use whichever location has stock for margin calc
+  const purchDisc = lp > 0 && fifo > 0 ? ((lp - fifo) / lp) * 100 : 0;
   const custExGst = lp * (1 - d / 100);
-  const custGst = (custExGst * gst) / 100;
+  const custGst = (custExGst * GST) / 100;
   const custIncl = custExGst + custGst;
-
-  // Margin in ₹ = customer ex-GST − your cost
-  const margin = yourCost > 0 && custExGst > 0 ? custExGst - yourCost : 0;
-
-  // Margin % = spread on list price
-  // bought 35.4% off list, selling 22% off list → 35.4 − 22 = 13.4% of list
-  const marginPct =
-    lp > 0 && yourCost > 0 ? ((custExGst - yourCost) / lp) * 100 : 0;
-
+  const margin = fifo > 0 && custExGst > 0 ? custExGst - fifo : 0;
+  const marginPct = lp > 0 && fifo > 0 ? ((custExGst - fifo) / lp) * 100 : 0;
   const profitable = margin > 0;
-  const hasCalc = lp > 0 && d >= 0;
+  const hasCalc = lp > 0;
+
+  const kochiQty = lot?.kochi?.found ? lot.kochi.totalOpenQty : 0;
+  const bloreQty = lot?.bangalore?.found ? lot.bangalore.totalOpenQty : 0;
 
   return (
     <>
       <style>{`
-        .pf-btn { display:inline-flex; align-items:center; gap:5px; background:transparent;
-          border:1px solid var(--border); border-radius:6px; padding:4px 10px; font-size:11px;
-          color:var(--text-dim); cursor:pointer; white-space:nowrap; transition:all 0.12s; }
-        .pf-btn:hover,.pf-btn.on { border-color:var(--accent); color:var(--accent); background:rgba(59,130,246,0.07); }
-        .pf-panel { position:fixed; top:52px; right:12px; width:420px; max-width:calc(100vw - 24px);
-          z-index:200; background:var(--bg-card); border:1px solid var(--border); border-radius:12px;
-          box-shadow:0 16px 48px rgba(0,0,0,0.5); padding:16px; animation:pfin 0.14s ease;
-          max-height:calc(100vh - 70px); overflow-y:auto; }
-        @keyframes pfin { from{opacity:0;transform:translateY(-5px)} to{opacity:1;transform:translateY(0)} }
-        @media(max-width:860px){
-          .pf-panel {
-            top:0 !important; right:0 !important; left:0 !important; bottom:0 !important;
-            width:100vw !important; max-width:100vw !important;
-            max-height:100vh !important; height:100vh !important;
-            border-radius:0 !important; border:none !important;
-            padding:20px 16px !important;
-          }
+        .pf-trigger {
+          display: inline-flex; align-items: center; gap: 5px;
+          background: transparent; border: 1px solid var(--border);
+          border-radius: 6px; padding: 4px 10px; font-size: 11px;
+          color: var(--text-dim); cursor: pointer; white-space: nowrap; transition: all 0.12s;
         }
-        .pf-dchip { font-size:13px; font-weight:600; padding:7px 16px; border-radius:8px;
-          border:1px solid var(--border); background:var(--bg-input); color:var(--text-dim);
-          cursor:pointer; transition:all 0.12s; }
-        .pf-dchip:hover { border-color:var(--accent); color:var(--accent); }
-        .pf-dchip.on { background:var(--accent); border-color:var(--accent); color:#fff; }
-        .pf-drop { position:absolute; top:calc(100% + 4px); left:0; right:0; z-index:299;
-          background:var(--bg-input); border:1px solid var(--border); border-radius:8px;
-          max-height:200px; overflow-y:auto; box-shadow:0 8px 24px rgba(0,0,0,0.4); }
-        .pf-drop-item { padding:8px 10px; cursor:pointer; border-bottom:1px solid var(--border);
-          font-size:12px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
-        .pf-drop-item:last-child { border-bottom:none; }
-        .pf-drop-item:hover { background:rgba(59,130,246,0.08); }
-        .pf-row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; margin-top:12px; }
-        .pf-card { border-radius:8px; padding:10px 12px; border:1px solid var(--border); background:var(--bg-input); }
-        .pf-card.green  { background:rgba(34,197,94,0.08);  border-color:rgba(34,197,94,0.25); }
-        .pf-card.green-s{ background:rgba(34,197,94,0.14);  border-color:rgba(34,197,94,0.4);  }
-        .pf-card.red    { background:rgba(239,68,68,0.08);  border-color:rgba(239,68,68,0.25); }
-        .pf-card-l { font-size:9px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em; margin-bottom:4px; }
-        .pf-card-v { font-size:20px; font-weight:700; }
-        .pf-card-s { font-size:10px; color:var(--text-muted); margin-top:2px; }
-        .pf-lot { font-size:11px; padding:7px 10px; border-radius:7px; margin-top:10px;
-          background:rgba(245,158,11,0.06); border:1px solid rgba(245,158,11,0.25);
-          display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-        /* iOS zoom fix: inputs must be >= 16px to prevent autozoom on focus */
+        .pf-trigger:hover, .pf-trigger.on {
+          border-color: var(--accent); color: var(--accent); background: rgba(59,130,246,0.07);
+        }
+        .pf-panel {
+          position: fixed; top: 52px; right: 12px;
+          width: 380px; max-width: calc(100vw - 24px);
+          max-height: calc(100vh - 70px); overflow-y: auto;
+          z-index: 200; background: var(--bg-card);
+          border: 1px solid var(--border); border-radius: 12px;
+          box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+          animation: pfin 0.14s ease;
+        }
+        @keyframes pfin { from{opacity:0;transform:translateY(-5px)} to{opacity:1;transform:translateY(0)} }
         .pf-panel input, .pf-panel select { font-size: 16px !important; }
-        @media(max-width:860px){
-          .pf-row { grid-template-columns:1fr 1fr; }
+        .pf-row { border-bottom: 1px solid var(--border); padding: 14px 16px; }
+        .pf-row:last-child { border-bottom: none; }
+        .pf-search-box {
+          display: flex; align-items: center; gap: 10px;
+          background: var(--bg-input); border: 1px solid var(--border);
+          border-radius: 10px; padding: 11px 13px; cursor: text;
+        }
+        .pf-search-box.active { border-color: var(--accent); }
+        .pf-drop {
+          position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 299;
+          background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.4); overflow: hidden;
+        }
+        .pf-drop-item {
+          display: flex; justify-content: space-between; align-items: center;
+          padding: 12px 14px; cursor: pointer; border-bottom: 1px solid var(--border); gap: 8px;
+        }
+        .pf-drop-item:last-child { border-bottom: none; }
+        .pf-drop-item:active { background: rgba(59,130,246,0.08); }
+        .pf-chips { display: flex; gap: 6px; margin-bottom: 8px; }
+        .pf-chip {
+          flex: 1; text-align: center; padding: 11px 0;
+          border-radius: 8px; font-size: 15px; font-weight: 500;
+          border: 1px solid var(--border); background: var(--bg-input);
+          color: var(--text-dim); cursor: pointer; transition: all 0.1s;
+        }
+        .pf-chip:active { opacity: 0.7; }
+        .pf-chip.on {
+          background: rgba(59,130,246,0.1); border-color: var(--accent);
+          color: var(--accent); border-width: 1.5px;
+        }
+        .pf-other {
+          display: flex; align-items: center; gap: 10px;
+          background: var(--bg-input); border: 1px solid var(--border);
+          border-radius: 8px; padding: 9px 12px;
+        }
+        .pf-results { background: var(--bg-input); }
+        .pf-result-grid { display: grid; grid-template-columns: 1fr 1fr; }
+        .pf-result-cell { padding: 16px; }
+        .pf-result-cell:first-child { border-right: 1px solid var(--border); }
+        .pf-result-label { font-size: 10px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 5px; }
+        .pf-result-value { font-size: 26px; font-weight: 500; line-height: 1; }
+        .pf-result-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+        .pf-margin-row {
+          padding: 14px 16px; display: flex; align-items: center;
+          justify-content: space-between; border-top: 1px solid var(--border);
+        }
+        .pf-stock-row {
+          display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+          padding: 12px 16px; border-top: 1px solid var(--border);
+          background: var(--bg-card);
+        }
+        .pf-stock-pill {
+          display: flex; align-items: center; justify-content: space-between;
+          background: var(--bg-input); border: 1px solid var(--border);
+          border-radius: 7px; padding: 8px 10px;
+        }
+        @media (max-width: 860px) {
+          .pf-panel {
+            top: 0; right: 0; left: 0; bottom: 0;
+            width: 100vw; max-width: 100vw;
+            height: 100vh; max-height: 100vh;
+            border-radius: 0; border: none;
+          }
           :root { --pf-backdrop-display: none; }
         }
       `}</style>
 
-      {/* ── Trigger button ── */}
+      {/* Trigger */}
       <button
-        className={`pf-btn${open ? " on" : ""}`}
+        className={`pf-trigger${open ? " on" : ""}`}
         onClick={() => setOpen((v) => !v)}
       >
         <span style={{ fontSize: 13 }}>⚡</span> Price finder
       </button>
 
-      {/* Backdrop — desktop only. On mobile the panel fills the screen so no backdrop needed */}
+      {/* Backdrop (desktop only) */}
       {open && (
         <div
           onClick={() => setOpen(false)}
@@ -214,7 +244,7 @@ export default function PriceFinder({ products }: Props) {
         />
       )}
 
-      {/* ── Panel ── */}
+      {/* Panel */}
       {open && (
         <div
           className="pf-panel"
@@ -223,8 +253,8 @@ export default function PriceFinder({ products }: Props) {
           }}
           onTouchEnd={(e) => {
             if (touchStartX.current === null) return;
-            const dx = e.changedTouches[0].clientX - touchStartX.current;
-            if (dx > 80) setOpen(false); // right swipe → close
+            if (e.changedTouches[0].clientX - touchStartX.current > 80)
+              setOpen(false);
             touchStartX.current = null;
           }}
         >
@@ -234,34 +264,35 @@ export default function PriceFinder({ products }: Props) {
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              marginBottom: 14,
+              padding: "14px 16px",
+              borderBottom: "1px solid var(--border)",
+              background: "var(--bg-card)",
+              position: "sticky",
+              top: 0,
+              zIndex: 10,
             }}
           >
-            <span
-              style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}
-            >
-              ⚡ Price finder
-            </span>
-            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              {selectedModel && (
-                <button
-                  className="pf-btn"
-                  style={{ fontSize: 10, padding: "3px 8px" }}
-                  onClick={openDs}
-                >
-                  📄{" "}
-                  {dsState === "loading"
-                    ? "…"
-                    : dsState === "none"
-                      ? "Not found"
-                      : "Datasheet"}
-                </button>
-              )}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 16 }}>⚡</span>
+              <span
+                style={{ fontSize: 15, fontWeight: 500, color: "var(--text)" }}
+              >
+                Price finder
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               {query && (
                 <button
-                  className="btn-ghost"
-                  style={{ fontSize: 10, padding: "3px 8px" }}
                   onClick={reset}
+                  style={{
+                    fontSize: 12,
+                    padding: "5px 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border)",
+                    background: "transparent",
+                    color: "var(--text-muted)",
+                    cursor: "pointer",
+                  }}
                 >
                   Clear
                 </button>
@@ -273,7 +304,7 @@ export default function PriceFinder({ products }: Props) {
                   border: "none",
                   color: "var(--text-muted)",
                   cursor: "pointer",
-                  fontSize: 20,
+                  fontSize: 22,
                   lineHeight: 1,
                   padding: "0 2px",
                 }}
@@ -283,24 +314,55 @@ export default function PriceFinder({ products }: Props) {
             </div>
           </div>
 
-          {/* Model search */}
-          <div style={{ position: "relative", marginBottom: 10 }}>
-            <input
-              ref={inputRef}
-              type="text"
-              value={query}
-              placeholder="Type model name…"
-              autoComplete="off"
-              style={{ fontSize: 14, fontWeight: 500 }}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                setSelectedModel("");
-                setListPrice("");
-                setLot(null);
-                setDropOpen(true);
-              }}
-              onFocus={() => query && setDropOpen(true)}
-            />
+          {/* Search */}
+          <div className="pf-row" style={{ position: "relative" }}>
+            <div
+              className={`pf-search-box${dropOpen && query ? " active" : ""}`}
+              onClick={() => inputRef.current?.focus()}
+            >
+              <span style={{ fontSize: 16, color: "var(--text-muted)" }}>
+                🔍
+              </span>
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                placeholder="Search model…"
+                autoComplete="off"
+                style={{
+                  flex: 1,
+                  background: "transparent",
+                  border: "none",
+                  outline: "none",
+                  color: "var(--text)",
+                  fontWeight: query ? 500 : 400,
+                }}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setSelectedModel("");
+                  setListPrice("");
+                  setLot(null);
+                  setDropOpen(true);
+                }}
+                onFocus={() => query && setDropOpen(true)}
+              />
+              {selectedModel && (
+                <span
+                  onClick={openDs}
+                  style={{
+                    cursor: "pointer",
+                    fontSize: 16,
+                    color:
+                      dsState === "none"
+                        ? "var(--text-muted)"
+                        : "var(--accent)",
+                  }}
+                >
+                  {dsState === "loading" ? "⏳" : "📄"}
+                </span>
+              )}
+            </div>
+
             {dropOpen && filtered.length > 0 && (
               <>
                 <div
@@ -320,32 +382,38 @@ export default function PriceFinder({ products }: Props) {
                       onClick={() => pick(p)}
                     >
                       <div>
-                        <span style={{ fontWeight: 600, color: "var(--text)" }}>
+                        <div
+                          style={{
+                            fontSize: 15,
+                            fontWeight: 500,
+                            color: "var(--text)",
+                          }}
+                        >
                           {p.model}
-                        </span>
+                        </div>
                         {p.description && (
-                          <span
+                          <div
                             style={{
-                              marginLeft: 6,
-                              fontSize: 10,
+                              fontSize: 12,
                               color: "var(--text-muted)",
+                              marginTop: 2,
                             }}
                           >
                             {p.description}
-                          </span>
+                          </div>
                         )}
                       </div>
                       {p.listPrice && (
-                        <span
+                        <div
                           style={{
-                            fontSize: 11,
+                            fontSize: 14,
+                            fontWeight: 500,
                             color: "var(--accent)",
-                            fontWeight: 600,
                             flexShrink: 0,
                           }}
                         >
-                          ₹{p.listPrice.toLocaleString("en-IN")}
-                        </span>
+                          {fmt(p.listPrice)}
+                        </div>
                       )}
                     </div>
                   ))}
@@ -354,262 +422,274 @@ export default function PriceFinder({ products }: Props) {
             )}
           </div>
 
-          {/* List price + GST */}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto",
-              gap: 8,
-              marginBottom: 14,
-              alignItems: "end",
-            }}
-          >
-            <div>
-              <label
-                style={{
-                  fontSize: 10,
-                  color: "var(--text-muted)",
-                  display: "block",
-                  marginBottom: 3,
-                }}
-              >
-                LIST PRICE (₹ EX-GST)
-              </label>
-              <input
-                type="number"
-                value={listPrice}
-                placeholder="Auto-filled or enter manually"
-                onChange={(e) =>
-                  setListPrice(e.target.value === "" ? "" : +e.target.value)
-                }
-              />
+          {/* List price */}
+          <div className="pf-row">
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                marginBottom: 6,
+              }}
+            >
+              List price (ex-GST)
             </div>
-            <div>
-              <label
-                style={{
-                  fontSize: 10,
-                  color: "var(--text-muted)",
-                  display: "block",
-                  marginBottom: 3,
-                }}
-              >
-                GST
-              </label>
-              <select
-                value={gst}
-                onChange={(e) => setGst(+e.target.value)}
-                style={{ width: 80 }}
-              >
-                {[5, 12, 18, 28].map((g) => (
-                  <option key={g} value={g}>
-                    {g}%
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          {/* Discount chips */}
-          <label
-            style={{
-              fontSize: 10,
-              color: "var(--text-muted)",
-              display: "block",
-              marginBottom: 6,
-            }}
-          >
-            CUSTOMER DISCOUNT
-          </label>
-          <div
-            style={{
-              display: "flex",
-              gap: 6,
-              alignItems: "center",
-              marginBottom: 4,
-            }}
-          >
-            {DISCS.map((dc) => (
-              <button
-                key={dc}
-                className={`pf-dchip${activeDisc === dc ? " on" : ""}`}
-                onClick={() => {
-                  setDisc(dc);
-                  setActiveDisc(dc);
-                }}
-              >
-                {dc}%
-              </button>
-            ))}
             <input
               type="number"
-              min={0}
-              max={100}
-              value={disc === "" ? "" : String(disc)}
-              placeholder="—"
+              value={listPrice}
+              placeholder="Auto-filled on selection"
               style={{
-                width: 60,
-                textAlign: "center",
-                fontWeight: 600,
-                fontSize: 13,
+                width: "100%",
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: "1px solid var(--border)",
+                background: "var(--bg-input)",
+                color: "var(--text)",
+                fontWeight: 500,
               }}
-              onChange={(e) => {
-                const v =
-                  e.target.value === "" ? "" : Math.min(100, +e.target.value);
-                setDisc(v);
-                setActiveDisc(null);
-              }}
+              onChange={(e) =>
+                setListPrice(e.target.value === "" ? "" : +e.target.value)
+              }
             />
           </div>
 
-          {/* Location toggle */}
-          {selectedModel && (
-            <div style={{ display: "flex", gap: 5, marginTop: 8 }}>
-              {["Kochi", "Bangalore"].map((loc) => (
+          {/* Discount */}
+          <div className="pf-row">
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                marginBottom: 8,
+              }}
+            >
+              Customer discount
+            </div>
+            <div className="pf-chips">
+              {DISCS.map((dc) => (
                 <button
-                  key={loc}
-                  className={`pf-btn${location === loc ? " on" : ""}`}
-                  style={{ fontSize: 10, padding: "3px 9px" }}
-                  onClick={() => setLocation(loc)}
+                  key={dc}
+                  className={`pf-chip${activeDisc === dc ? " on" : ""}`}
+                  onClick={() => {
+                    setDisc(dc);
+                    setActiveDisc(dc);
+                  }}
                 >
-                  {loc}
+                  {dc}%
                 </button>
               ))}
             </div>
-          )}
+            <div className="pf-other">
+              <span
+                style={{
+                  fontSize: 12,
+                  color: "var(--text-muted)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Other discount
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={
+                  activeDisc !== null ? "" : disc === "" ? "" : String(disc)
+                }
+                placeholder="Type %"
+                style={{
+                  flex: 1,
+                  background: "var(--bg-input)",
+                  border: "none",
+                  outline: "none",
+                  color: "var(--text)",
+                  textAlign: "center",
+                  fontWeight: 500,
+                  fontSize: "16px",
+                }}
+                onFocus={() => setActiveDisc(null)}
+                onChange={(e) => {
+                  const v =
+                    e.target.value === "" ? "" : Math.min(100, +e.target.value);
+                  setDisc(v);
+                  setActiveDisc(null);
+                }}
+              />
+            </div>
+          </div>
 
-          {/* FIFO lot cost */}
-          {selectedModel && (
-            <div className="pf-lot">
-              {lotLoading ? (
-                <span style={{ color: "var(--text-muted)" }}>Loading lot…</span>
-              ) : lot?.found ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {/* Results */}
+          {hasCalc && (
+            <div className="pf-results">
+              <div
+                className="pf-result-grid"
+                style={{ borderTop: "1px solid var(--border)" }}
+              >
+                <div className="pf-result-cell">
+                  <div
+                    className="pf-result-label"
+                    style={{ color: "var(--accent-green)" }}
+                  >
+                    Ex-GST
+                  </div>
+                  <div
+                    className="pf-result-value"
+                    style={{ color: "var(--accent-green)" }}
+                  >
+                    {fmt(custExGst)}
+                  </div>
+                  <div className="pf-result-sub">after {d}% disc</div>
+                </div>
+                <div className="pf-result-cell">
+                  <div
+                    className="pf-result-label"
+                    style={{ color: "var(--text-muted)" }}
+                  >
+                    Incl. GST
+                  </div>
+                  <div
+                    className="pf-result-value"
+                    style={{ color: "var(--text)" }}
+                  >
+                    {fmt(custIncl)}
+                  </div>
+                  <div className="pf-result-sub">+{fmt(custGst)} GST</div>
+                </div>
+              </div>
+
+              {fifo > 0 && (
+                <div
+                  className="pf-margin-row"
+                  style={{
+                    background: profitable
+                      ? "rgba(34,197,94,0.08)"
+                      : "rgba(239,68,68,0.07)",
+                    borderTopColor: profitable
+                      ? "rgba(34,197,94,0.2)"
+                      : "rgba(239,68,68,0.2)",
+                  }}
+                >
                   <div>
                     <div
                       style={{
-                        fontSize: 10,
-                        color: "var(--text-muted)",
-                        marginBottom: 2,
+                        fontSize: 14,
+                        fontWeight: 500,
+                        color: profitable
+                          ? "var(--accent-green)"
+                          : "var(--accent-red)",
                       }}
                     >
-                      Purchase cost
+                      Your margin
                     </div>
-                    <span
+                    <div
                       style={{
-                        fontSize: 18,
-                        fontWeight: 700,
-                        background: "rgba(34,197,94,0.13)",
-                        color: "var(--accent-green)",
-                        padding: "2px 10px",
-                        borderRadius: 6,
-                        display: "inline-block",
+                        fontSize: 13,
+                        marginTop: 3,
+                        color: profitable
+                          ? "var(--accent-green)"
+                          : "var(--accent-red)",
+                        opacity: 0.8,
                       }}
                     >
-                      {fmt(lot.fifoPrice)}
-                    </span>
-                  </div>
-                  {lp > 0 && (
-                    <div>
-                      <div
-                        style={{
-                          fontSize: 10,
-                          color: "var(--text-muted)",
-                          marginBottom: 2,
-                        }}
-                      >
-                        Purchase discount
-                      </div>
-                      <span
-                        style={{
-                          fontSize: 18,
-                          fontWeight: 700,
-                          color: "var(--accent-amber)",
-                        }}
-                      >
-                        {purchaseDiscPct.toFixed(1)}%
-                      </span>
+                      {profitable ? "+" : ""}
+                      {fmt(margin)} / unit
                     </div>
-                  )}
-                </div>
-              ) : (
-                <span style={{ fontSize: 11, color: "var(--accent-red)" }}>
-                  No open lots in {location}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* Result cards */}
-          {hasCalc && (
-            <div className="pf-row">
-              {/* Ex-GST */}
-              <div className="pf-card green">
-                <div
-                  className="pf-card-l"
-                  style={{ color: "var(--accent-green)" }}
-                >
-                  Ex-GST
-                </div>
-                <div
-                  className="pf-card-v"
-                  style={{ color: "var(--accent-green)" }}
-                >
-                  {fmt(custExGst)}
-                </div>
-                <div className="pf-card-s">after {d}% disc</div>
-              </div>
-
-              {/* Incl GST */}
-              <div className="pf-card">
-                <div className="pf-card-l">Incl. GST</div>
-                <div className="pf-card-v" style={{ color: "var(--text)" }}>
-                  {fmt(custIncl)}
-                </div>
-                <div className="pf-card-s">+{fmt(custGst)} GST</div>
-              </div>
-
-              {/* Margin */}
-              {yourCost > 0 && (
-                <div className={`pf-card ${profitable ? "green-s" : "red"}`}>
-                  <div
-                    className="pf-card-l"
-                    style={{
-                      color: profitable
-                        ? "var(--accent-green)"
-                        : "var(--accent-red)",
-                    }}
-                  >
-                    Your margin
                   </div>
-                  <div
-                    className="pf-card-v"
+                  <span
                     style={{
+                      fontSize: 34,
+                      fontWeight: 500,
+                      lineHeight: 1,
                       color: profitable
                         ? "var(--accent-green)"
                         : "var(--accent-red)",
                     }}
                   >
                     {marginPct.toFixed(1)}%
+                  </span>
+                </div>
+              )}
+
+              {/* Stock */}
+              {selectedModel && (
+                <div className="pf-stock-row">
+                  <div className="pf-stock-pill">
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      Kochi
+                    </span>
                     <span
                       style={{
-                        fontSize: 10,
-                        fontWeight: 400,
-                        marginLeft: 2,
-                        color: "var(--text-muted)",
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color:
+                          kochiQty > 0
+                            ? "var(--accent-green)"
+                            : "var(--text-muted)",
                       }}
                     >
-                      of list
+                      {lotLoading ? "…" : `${kochiQty} units`}
                     </span>
                   </div>
-                  <div className="pf-card-s">
-                    {profitable ? "+" : ""}
-                    {fmt(margin)} / unit
-                  </div>
-                  <div className="pf-card-s" style={{ marginTop: 2 }}>
-                    bought {purchaseDiscPct.toFixed(1)}% · sold {d}%
+                  <div className="pf-stock-pill">
+                    <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                      Bangalore
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color:
+                          bloreQty > 0
+                            ? "var(--accent-green)"
+                            : "var(--text-muted)",
+                      }}
+                    >
+                      {lotLoading ? "…" : `${bloreQty} units`}
+                    </span>
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Stock without results (model selected but no list price yet) */}
+          {!hasCalc && selectedModel && (
+            <div
+              className="pf-stock-row"
+              style={{ borderTop: "1px solid var(--border)" }}
+            >
+              <div className="pf-stock-pill">
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  Kochi
+                </span>
+                <span
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 500,
+                    color:
+                      kochiQty > 0
+                        ? "var(--accent-green)"
+                        : "var(--text-muted)",
+                  }}
+                >
+                  {lotLoading ? "…" : `${kochiQty} units`}
+                </span>
+              </div>
+              <div className="pf-stock-pill">
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  Bangalore
+                </span>
+                <span
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 500,
+                    color:
+                      bloreQty > 0
+                        ? "var(--accent-green)"
+                        : "var(--text-muted)",
+                  }}
+                >
+                  {lotLoading ? "…" : `${bloreQty} units`}
+                </span>
+              </div>
             </div>
           )}
         </div>
