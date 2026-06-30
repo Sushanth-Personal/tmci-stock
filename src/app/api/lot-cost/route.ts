@@ -1,4 +1,5 @@
 // src/app/api/lot-cost/route.ts
+// Reads everything from lots table — single source of truth
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -15,14 +16,13 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const model = searchParams.get("model");
-    const location = searchParams.get("location"); // optional filter
+    const location = searchParams.get("location");
 
-    if (!model) {
+    if (!model)
       return NextResponse.json(
         { error: "model param required" },
         { status: 400 },
       );
-    }
 
     const supabase = getSupabase();
 
@@ -31,55 +31,56 @@ export async function GET(req: Request) {
       .select(
         "lot_id, date, model, location, qty_purchased, remaining_qty, unit_purchase_price, vendor, po_invoice",
       )
-      .eq("model", model)
-      .gt("remaining_qty", 0) // open lots only
-      .order("date", { ascending: true }) // oldest first = true FIFO
+      .ilike("model", model)
+      .gt("remaining_qty", 0)
+      .order("date", { ascending: true })
       .order("lot_id", { ascending: true });
 
-    if (location) {
-      query = query.eq("location", location);
-    }
+    if (location) query = query.ilike("location", location);
 
     const { data, error } = await query;
     if (error) throw error;
 
     const lots = data ?? [];
 
-    if (lots.length === 0) {
-      return NextResponse.json({ found: false, lots: [] });
-    }
-
-    // Oldest open lot = next one FIFO will consume
-    const fifoLot = lots[0];
-
-    // Weighted average across all open lots (for reference)
-    const totalQty = lots.reduce((s: number, l: any) => s + l.remaining_qty, 0);
-    const totalValue = lots.reduce(
-      (s: number, l: any) => s + l.remaining_qty * l.unit_purchase_price,
+    // Total open qty directly from lots — single source of truth
+    const totalOpenQty = lots.reduce(
+      (s: number, l: any) => s + Number(l.remaining_qty),
       0,
     );
-    const weightedAvg = totalQty > 0 ? totalValue / totalQty : 0;
+
+    if (lots.length === 0) {
+      return NextResponse.json({ found: false, totalOpenQty: 0, lots: [] });
+    }
+
+    const fifoLot = lots[0];
+    const totalValue = lots.reduce(
+      (s: number, l: any) =>
+        s + Number(l.remaining_qty) * Number(l.unit_purchase_price),
+      0,
+    );
+    const weightedAvg = totalOpenQty > 0 ? totalValue / totalOpenQty : 0;
 
     return NextResponse.json({
       found: true,
-      fifoPrice: fifoLot.unit_purchase_price, // oldest lot — what FIFO will charge
+      fifoPrice: Number(fifoLot.unit_purchase_price),
       fifoLot: {
         lotId: fifoLot.lot_id,
         date: fifoLot.date,
         location: fifoLot.location,
-        remaining: fifoLot.remaining_qty,
-        price: fifoLot.unit_purchase_price,
+        remaining: Number(fifoLot.remaining_qty),
+        price: Number(fifoLot.unit_purchase_price),
         vendor: fifoLot.vendor,
         po: fifoLot.po_invoice,
       },
       weightedAvg,
-      totalOpenQty: totalQty,
+      totalOpenQty,
       allLots: lots.map((l: any) => ({
         lotId: l.lot_id,
         date: l.date,
         location: l.location,
-        remaining: l.remaining_qty,
-        price: l.unit_purchase_price,
+        remaining: Number(l.remaining_qty),
+        price: Number(l.unit_purchase_price),
         vendor: l.vendor,
       })),
     });

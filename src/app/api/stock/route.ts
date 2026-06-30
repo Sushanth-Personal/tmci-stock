@@ -1,6 +1,7 @@
 // src/app/api/stock/route.ts
-// Reads stock + lots + products from Supabase (not Google Sheets)
-// This ensures dispatched invoices immediately reflect in stock view.
+// Reads from lots table — single source of truth
+// Returns one row per model (not per location)
+// kochiStock + bangaloreStock as separate fields to match StockView columns
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -17,99 +18,105 @@ export async function GET() {
   try {
     const supabase = getSupabase();
 
-    // Fetch all three tables in parallel
-    const [stockRes, lotsRes, productsRes] = await Promise.all([
-      supabase.from("stock").select("*"),
-      supabase.from("lots").select("*"),
+    const [lotsRes, productsRes] = await Promise.all([
+      supabase
+        .from("lots")
+        .select(
+          "model, location, qty_purchased, remaining_qty, unit_purchase_price",
+        ),
       supabase.from("products").select("*"),
     ]);
 
-    if (stockRes.error) throw stockRes.error;
     if (lotsRes.error) throw lotsRes.error;
     if (productsRes.error) throw productsRes.error;
 
-    const stock = stockRes.data ?? [];
     const lots = lotsRes.data ?? [];
     const products = productsRes.data ?? [];
 
-    // Build product lookup by model (primary) and item_code (fallback)
-    const productByModel = new Map(products.map((p: any) => [p.model, p]));
-    const productByItemCode = new Map(
-      products
-        .filter((p: any) => p.item_code)
-        .map((p: any) => [p.item_code, p]),
+    const productByModel = new Map(
+      products.map((p: any) => [String(p.model ?? "").toLowerCase(), p]),
     );
-    const getProduct = (itemCode: string, model: string) =>
-      productByModel.get(model) ?? productByItemCode.get(itemCode);
 
-    // Sort lots oldest first for FIFO cost calculation
-    const sortedLots = [...lots].sort((a: any, b: any) => {
-      const da = new Date(a.date).getTime();
-      const db = new Date(b.date).getTime();
-      if (!isNaN(da) && !isNaN(db) && da !== db) return da - db;
-      return (a.lot_id ?? "").localeCompare(b.lot_id ?? "");
-    });
+    // Group by model — one entry per model with kochi+bangalore broken out
+    const grouped = new Map<
+      string,
+      {
+        model: string;
+        kochiQty: number;
+        kochiValue: number;
+        bloreQty: number;
+        bloreValue: number;
+        totalReceived: number;
+        totalSold: number;
+      }
+    >();
 
-    // Last known purchase price per model (fallback when no open lots)
-    const lastKnownPrice = new Map<string, number>();
-    for (const l of sortedLots) {
-      if (l.unit_purchase_price > 0)
-        lastKnownPrice.set(l.model, l.unit_purchase_price);
-    }
+    for (const l of lots) {
+      const key = String(l.model).toLowerCase();
+      const loc = String(l.location ?? "").toLowerCase();
+      const purchased = Number(l.qty_purchased ?? 0);
+      const remaining = Number(l.remaining_qty ?? 0);
+      const price = Number(l.unit_purchase_price ?? 0);
 
-    // Weighted average cost per (model, location) from open lots
-    const costMap = new Map<string, number>();
-    const modelLocSet = new Set(
-      lots.map((l: any) => `${l.model}__${l.location}`),
-    );
-    for (const key of modelLocSet) {
-      const [model, loc] = key.split("__");
-      const openLots = lots.filter(
-        (l: any) =>
-          l.model === model && l.location === loc && l.remaining_qty > 0,
-      );
-      const fallback = lastKnownPrice.get(model) ?? 0;
-      if (openLots.length > 0) {
-        const totalQty = openLots.reduce(
-          (s: number, l: any) => s + l.remaining_qty,
-          0,
-        );
-        const totalVal = openLots.reduce((s: number, l: any) => {
-          const price =
-            l.unit_purchase_price > 0 ? l.unit_purchase_price : fallback;
-          return s + l.remaining_qty * price;
-        }, 0);
-        if (totalQty > 0) costMap.set(key, totalVal / totalQty);
-      } else if (fallback > 0) {
-        costMap.set(key, fallback);
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          model: l.model,
+          kochiQty: 0,
+          kochiValue: 0,
+          bloreQty: 0,
+          bloreValue: 0,
+          totalReceived: 0,
+          totalSold: 0,
+        });
+      }
+      const g = grouped.get(key)!;
+      g.totalReceived += purchased;
+      g.totalSold += purchased - remaining;
+
+      if (loc === "kochi") {
+        g.kochiQty += remaining;
+        g.kochiValue += remaining * price;
+      } else {
+        g.bloreQty += remaining;
+        g.bloreValue += remaining * price;
       }
     }
 
-    // Enrich stock rows
-    const enriched = stock.map((s: any) => {
-      const prod = getProduct(s.item_code ?? "", s.model);
-      const costPrice = costMap.get(`${s.model}__${s.location}`) ?? 0;
-      return {
-        // Normalise to camelCase so StockView.tsx doesn't need changes
-        row: 0,
-        itemCode: s.item_code ?? "",
-        make: s.make ?? prod?.make ?? "",
-        model: s.model,
-        description: s.description ?? prod?.description ?? "",
-        location: s.location,
-        category: prod?.category ?? "",
-        openingStock: s.opening_stock ?? 0,
-        ordered: s.ordered ?? 0,
-        received: s.received ?? 0,
-        sold: s.sold ?? 0,
-        currentStock: s.current_stock ?? 0,
-        listPrice: s.list_price ?? prod?.list_price ?? 0,
-        costPrice,
-        stockValue: (s.current_stock ?? 0) * costPrice,
-      };
-    });
+    const stock = Array.from(grouped.values())
+      .filter((g) => g.totalReceived > 0)
+      .map((g) => {
+        const prod = productByModel.get(g.model.toLowerCase());
+        const totalQty = g.kochiQty + g.bloreQty;
+        const totalVal = g.kochiValue + g.bloreValue;
+        const costPrice =
+          totalQty > 0
+            ? totalVal / totalQty
+            : g.totalReceived > 0
+              ? (g.kochiValue + g.bloreValue) / Math.max(g.totalReceived, 1)
+              : 0;
 
-    return NextResponse.json({ stock: enriched });
+        return {
+          // Fields StockView expects
+          itemCode: prod?.item_code ?? "",
+          make: prod?.make ?? "",
+          model: g.model,
+          description: prod?.description ?? "",
+          category: prod?.category ?? "",
+          openingStock: 0,
+          received: g.totalReceived,
+          sold: g.totalSold,
+          currentStock: totalQty, // total across both locations
+          kochiStock: g.kochiQty, // for Kochi column
+          bangaloreStock: g.bloreQty, // for Blore column
+          listPrice: prod?.list_price ?? 0,
+          costPrice,
+          stockValue: totalVal,
+          // Keep location field for compatibility
+          location: "All",
+        };
+      });
+
+    return NextResponse.json({ stock });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });

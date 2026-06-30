@@ -74,20 +74,17 @@ export default function StockView({ products: _ }: { products: any[] }) {
     return Array.from(s).sort();
   }, [stock]);
 
-  // PATCH: replace the rows useMemo in src/components/StockView.tsx
-  // Change: composite key uses model+location instead of make|itemCode
-  // itemCode is blank for most products so the old key collapsed all rows into one
+  // REPLACE the entire "rows" useMemo in StockView.tsx with this:
 
   const rows = useMemo((): DisplayRow[] => {
     const map = new Map<string, DisplayRow>();
     for (const s of stock) {
-      // ── KEY FIX: key on model+location, NOT make|itemCode ─────────────────
-      // itemCode is blank for most rows; model is always populated.
-      const key = `${s.model}|${s.location}`;
+      // Key on model only — API now returns one row per model
+      const key = s.model;
       if (!map.has(key)) {
         map.set(key, {
           key,
-          itemCode: s.itemCode, // kept for display; may be blank
+          itemCode: s.itemCode,
           make: s.make,
           model: s.model,
           description: s.description,
@@ -101,9 +98,20 @@ export default function StockView({ products: _ }: { products: any[] }) {
         });
       }
       const row = map.get(key)!;
-      if (s.location === "Kochi") row.stockKochi = s.currentStock;
-      if (s.location === "Bangalore") row.stockBlore = s.currentStock;
-      row.stockValue += s.currentStock * (s.costPrice ?? 0);
+
+      // New API returns kochiStock + bangaloreStock directly
+      // Fall back to location-based logic for old API compatibility
+      if ((s as any).kochiStock !== undefined) {
+        row.stockKochi = (s as any).kochiStock;
+        row.stockBlore = (s as any).bangaloreStock ?? 0;
+      } else {
+        if (s.location === "Kochi") row.stockKochi = s.currentStock;
+        if (s.location === "Bangalore") row.stockBlore = s.currentStock;
+      }
+
+      row.stockValue +=
+        s.stockValue > 0 ? s.stockValue : s.currentStock * (s.costPrice ?? 0);
+
       if ((s.costPrice ?? 0) > row.costPrice) row.costPrice = s.costPrice;
     }
     for (const row of map.values()) {
@@ -111,7 +119,6 @@ export default function StockView({ products: _ }: { products: any[] }) {
     }
     return Array.from(map.values());
   }, [stock]);
-
   const handleSort = (col: SortCol) => {
     if (sortCol === col) {
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
