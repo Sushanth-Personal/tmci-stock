@@ -1,26 +1,38 @@
 // src/app/api/customers/route.ts
-import { NextResponse } from "next/server";
+// GET  /api/customers?q=search  → list customers (mapped for UI compatibility)
+// GET  /api/customers?id=uuid   → single customer
+// POST /api/customers           → create customer
+
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-function getSupabase() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!url || !key)
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-  return createClient(url, key);
+const supabase = createClient(
+  process.env.SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+);
+
+// Map DB row (Zoho schema: display_name, billing_*) → UI shape (name, address, city…)
+function mapCustomer(row: any) {
+  return {
+    id: row.id,
+    name: row.display_name ?? row.company_name ?? "",
+    address: row.billing_address ?? "",
+    city: row.billing_city ?? "",
+    state: row.billing_state ?? "",
+    pincode: row.billing_pincode ?? "",
+    gstin: row.gstin ?? "",
+    phone: row.phone ?? row.mobile ?? "",
+    email: row.email ?? "",
+    zoho_contact_id: row.zoho_contact_id ?? null,
+  };
 }
 
-// GET /api/customers?q=<search>&id=<uuid>&limit=50
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const q = searchParams.get("q") ?? "";
     const id = searchParams.get("id");
-    const limit = Number(searchParams.get("limit") ?? 50);
+    const q = (searchParams.get("q") ?? "").trim();
 
-    const supabase = getSupabase();
-
-    // Single customer by id
     if (id) {
       const { data, error } = await supabase
         .from("customers")
@@ -28,7 +40,7 @@ export async function GET(req: Request) {
         .eq("id", id)
         .single();
       if (error) throw error;
-      return NextResponse.json({ customer: data });
+      return NextResponse.json({ customer: mapCustomer(data) });
     }
 
     let query = supabase
@@ -36,91 +48,74 @@ export async function GET(req: Request) {
       .select("*")
       .eq("status", "Active")
       .order("display_name", { ascending: true })
-      .limit(limit);
+      .limit(25);
 
-    if (q.trim()) {
+    if (q) {
+      // Search display_name, company_name, and GSTIN
       query = query.or(
-        `display_name.ilike.%${q}%,company_name.ilike.%${q}%,gstin.ilike.%${q}%,billing_city.ilike.%${q}%`,
+        `display_name.ilike.%${q}%,company_name.ilike.%${q}%,gstin.ilike.%${q}%`,
       );
     }
 
     const { data, error } = await query;
     if (error) throw error;
-    return NextResponse.json({ customers: data ?? [] });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+
+    return NextResponse.json({ customers: (data ?? []).map(mapCustomer) });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
-// POST — create new customer
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    if (!body.display_name?.trim())
+
+    if (!body.name || !String(body.name).trim()) {
       return NextResponse.json(
-        { error: "display_name is required" },
+        { error: "Customer name is required" },
         { status: 400 },
       );
+    }
 
-    const supabase = getSupabase();
+    // Map UI shape → DB columns (Zoho schema)
+    const row = {
+      display_name: String(body.name).trim(),
+      company_name: String(body.name).trim(),
+      billing_address: body.address || null,
+      billing_city: body.city || null,
+      billing_state: body.state || null,
+      billing_pincode: body.pincode || null,
+      // Mirror billing → shipping by default
+      shipping_address: body.address || null,
+      shipping_city: body.city || null,
+      shipping_state: body.state || null,
+      shipping_pincode: body.pincode || null,
+      gstin: body.gstin || null,
+      phone: body.phone || null,
+      email: body.email || null,
+      customer_sub_type: "business",
+      status: "Active",
+    };
+
     const { data, error } = await supabase
       .from("customers")
-      .insert({ ...body, status: body.status ?? "Active" })
+      .insert(row)
       .select()
       .single();
 
-    if (error) throw error;
-    return NextResponse.json({ customer: data });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
-}
+    if (error) {
+      // Duplicate GSTIN or similar constraint
+      if (error.code === "23505") {
+        return NextResponse.json(
+          { error: "A customer with these details already exists." },
+          { status: 409 },
+        );
+      }
+      throw error;
+    }
 
-// PATCH /api/customers?id=<uuid> — update customer
-export async function PATCH(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const id = searchParams.get("id");
-    if (!id)
-      return NextResponse.json({ error: "id required" }, { status: 400 });
-
-    const body = await req.json();
-    const supabase = getSupabase();
-    const { data, error } = await supabase
-      .from("customers")
-      .update({ ...body, updated_at: new Date().toISOString() })
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error) throw error;
-    return NextResponse.json({ customer: data });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
-}
-
-// DELETE /api/customers?id=<uuid> — soft-delete (set status=Inactive)
-export async function DELETE(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const id = searchParams.get("id");
-    if (!id)
-      return NextResponse.json({ error: "id required" }, { status: 400 });
-
-    const supabase = getSupabase();
-    const { error } = await supabase
-      .from("customers")
-      .update({ status: "Inactive", updated_at: new Date().toISOString() })
-      .eq("id", id);
-
-    if (error) throw error;
-    return NextResponse.json({ success: true });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json({ customer: mapCustomer(data) });
+  } catch (e: any) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }

@@ -1,5 +1,6 @@
 "use client";
 import { useState, useMemo, useRef, useEffect } from "react";
+import InvoiceScanner from "@/components/InvoiceScanner";
 
 interface Props {
   products: any[];
@@ -13,7 +14,6 @@ interface BatchLine {
   total: number;
 }
 
-// Defined at module scope so these are stable function references across renders.
 const FG = ({ label, children, full, note }: any) => (
   <div style={{ gridColumn: full ? "1/-1" : undefined }}>
     <label>
@@ -48,9 +48,7 @@ const PriceRow = ({ label, value, final, color }: any) => (
   </div>
 );
 
-// ─────────────────────────────────────────────────────────────────────────
-// Searchable model combobox
-// ─────────────────────────────────────────────────────────────────────────
+// ── Searchable model combobox ──────────────────────────────────────────────────
 function ModelCombobox({
   products,
   value,
@@ -70,6 +68,9 @@ function ModelCombobox({
   useEffect(() => {
     setQuery(value);
   }, [value]);
+  useEffect(() => {
+    setHighlight(0);
+  }, [query, open]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -83,14 +84,9 @@ function ModelCombobox({
   }, [products, query]);
 
   useEffect(() => {
-    setHighlight(0);
-  }, [query, open]);
-
-  useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node))
         setOpen(false);
-      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
@@ -117,9 +113,7 @@ function ModelCombobox({
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (filtered[highlight]) choose(filtered[highlight]);
-    } else if (e.key === "Escape") {
-      setOpen(false);
-    }
+    } else if (e.key === "Escape") setOpen(false);
   };
 
   return (
@@ -175,12 +169,12 @@ function ModelCombobox({
             >
               <span style={{ fontWeight: 500, color: "var(--text)" }}>
                 {p.model}
-                {p.category ? (
+                {p.category && (
                   <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>
                     {" "}
                     ({p.category})
                   </span>
-                ) : null}
+                )}
               </span>
               <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>
                 {p.itemCode}
@@ -212,6 +206,7 @@ function ModelCombobox({
   );
 }
 
+// ── Main component ─────────────────────────────────────────────────────────────
 export default function RecordPurchase({ products, onSuccess }: Props) {
   const today = new Date().toISOString().split("T")[0];
 
@@ -219,9 +214,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const [batchLines, setBatchLines] = useState<BatchLine[]>([]);
 
   const [model, setModel] = useState("");
-  // Purchase date = when goods were received / the PO date
   const [date, setDate] = useState(today);
-  // Invoice date = supplier's invoice date (may differ from receipt date)
   const [invoiceDate, setInvoiceDate] = useState("");
   const [location, setLocation] = useState("Kochi");
   const [qty, setQty] = useState<number | "">("");
@@ -237,12 +230,32 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
+  // ── Scanner state (lives here in RecordPurchase, NOT in ModelCombobox) ──────
+  const [showScanner, setShowScanner] = useState(false);
+
   const modelInputRef = useRef<HTMLInputElement>(null);
 
   const product = useMemo(
     () => products.find((p) => p.model === model),
     [products, model],
   );
+
+  // ── Handler called when AI scan completes ──────────────────────────────────
+  const handleScanned = (data: any) => {
+    setSupplier(data.vendorOrCustomer ?? "");
+    setPoNumber(data.invoiceNumber ?? "");
+    setDate(data.invoiceDate ?? today);
+    if (data.lineItems.length > 1) setBatchMode(true);
+    const first = data.lineItems[0];
+    if (first) {
+      setModel(first.model ?? "");
+      setQty(first.qty ?? "");
+      setCustomFinal(first.unitPrice ?? "");
+      setBaseDiscount(first.discount ?? 0);
+      setAddDiscount(0);
+    }
+    setShowScanner(false);
+  };
 
   const pricing = useMemo(() => {
     if (!listPrice) return null;
@@ -345,7 +358,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
           },
         ]);
         setSuccess(
-          `Added: ${qty} × ${model} @ ₹${effectiveCost.toFixed(0)}/unit = ₹${(+(qty || 0) * effectiveCost).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`,
+          `Added: ${qty} × ${model} @ ₹${effectiveCost.toFixed(0)}/unit`,
         );
         clearLineFields();
         setTimeout(() => setSuccess(""), 1800);
@@ -380,7 +393,17 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Batch mode toggle + current PO summary */}
+      {/* ── Scanner modal — rendered at RecordPurchase root, NOT inside ModelCombobox ── */}
+      {showScanner && (
+        <InvoiceScanner
+          mode="purchase"
+          products={products}
+          onExtracted={handleScanned}
+          onClose={() => setShowScanner(false)}
+        />
+      )}
+
+      {/* Batch mode toggle */}
       <div
         style={{
           background: "var(--bg-card)",
@@ -497,18 +520,41 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
           padding: "12px 14px",
         }}
       >
+        {/* Header row with title + scan button */}
         <div
           style={{
-            fontSize: 10,
-            fontWeight: 500,
-            color: "var(--text-muted)",
-            textTransform: "uppercase",
-            letterSpacing: "0.05em",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
             marginBottom: 10,
           }}
         >
-          {batchMode ? "Add line item to PO" : "Purchase details"}
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 500,
+              color: "var(--text-muted)",
+              textTransform: "uppercase",
+              letterSpacing: "0.05em",
+            }}
+          >
+            {batchMode ? "Add line item to PO" : "Purchase details"}
+          </div>
+          <button
+            className="btn-ghost"
+            style={{
+              fontSize: 11,
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+            }}
+            onClick={() => setShowScanner(true)}
+            type="button"
+          >
+            🤖 Scan Invoice
+          </button>
         </div>
+
         <div
           style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
         >
@@ -520,8 +566,6 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               inputRef={modelInputRef}
             />
           </FG>
-
-          {/* ── Two date fields side by side ── */}
           <FG label="Purchase / receipt date">
             <input
               type="date"
@@ -536,7 +580,6 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               onChange={(e) => setInvoiceDate(e.target.value)}
             />
           </FG>
-
           <FG label="Location">
             <select
               value={location}
@@ -678,10 +721,9 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               type="text"
               value={supplier}
               onChange={(e) => setSupplier(e.target.value)}
-              placeholder="e.g. Shreyans Enterprises, CN Computers" // Changed
+              placeholder="e.g. Shreyans Enterprises"
             />
           </FG>
-
           <FG
             label="PO / Invoice No"
             note={batchMode ? "sticky for this PO" : undefined}
@@ -690,7 +732,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               type="text"
               value={poNumber}
               onChange={(e) => setPoNumber(e.target.value)}
-              placeholder="e.g. PO-2025-2026-035, No PO"
+              placeholder="e.g. PO-2025-2026-035"
             />
           </FG>
         </div>
@@ -730,7 +772,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               pricing.impliedAddDiscountPct !== null &&
               pricing.impliedAddDiscountPct < 0 ? (
                 <PriceRow
-                  label={`Markup vs. discounted price (${Math.abs(pricing.impliedAddDiscountPct).toFixed(1)}% above)`}
+                  label={`Markup (${Math.abs(pricing.impliedAddDiscountPct).toFixed(1)}% above)`}
                   value={`+ ₹${Math.abs(pricing.afterBase - +customFinal).toFixed(0)}`}
                   color="var(--accent-red)"
                 />

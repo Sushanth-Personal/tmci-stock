@@ -4,10 +4,12 @@
 // Full invoice builder. Flow:
 //   1. Search / create customer (stored in Supabase)
 //   2. Add line items (model, qty, rate, discount, serial numbers)
+//      — or Import from Claude JSON / Excel via 📥 Import Invoice
 //   3. Save invoice → Supabase (status: pending_dispatch)
 //   4. Stock is NOT touched here — only on dispatch (from dashboard)
 
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import InvoiceImport, { ImportedInvoice } from "@/components/InvoiceImport";
 
 interface Props {
   products: any[];
@@ -16,19 +18,14 @@ interface Props {
 
 interface Customer {
   id: string;
-  display_name: string;
-  company_name?: string;
-  phone?: string;
-  mobile?: string;
-  email?: string;
-  billing_address?: string;
-  billing_city?: string;
-  billing_state?: string;
-  billing_pincode?: string;
+  name: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  pincode?: string;
   gstin?: string;
-  gst_treatment?: string;
-  place_of_contact_label?: string;
-  payment_terms?: string;
+  phone?: string;
+  email?: string;
 }
 
 interface LineItem {
@@ -80,8 +77,7 @@ function emptyLine(): LineItem {
   };
 }
 
-// ─── Customer searchbox ──────────────────────────────────────────────────────
-// Works with the full Zoho Books schema: display_name, gstin, billing_city etc.
+// ─── Customer searchbox ────────────────────────────────────────────────────────
 function CustomerSearch({
   onSelect,
   selected,
@@ -89,7 +85,7 @@ function CustomerSearch({
   onSelect: (c: Customer | null) => void;
   selected: Customer | null;
 }) {
-  const [query, setQuery] = useState(selected?.display_name ?? "");
+  const [query, setQuery] = useState(selected?.name ?? "");
   const [results, setResults] = useState<Customer[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -97,34 +93,27 @@ function CustomerSearch({
   const wrapRef = useRef<HTMLDivElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // New customer quick-entry (minimal — full edit available in Customers screen)
-  const [nc, setNc] = useState({
-    display_name: "",
-    company_name: "",
-    billing_address: "",
-    billing_city: "",
-    billing_state: "",
-    billing_pincode: "",
+  const [nc, setNc] = useState<Omit<Customer, "id">>({
+    name: "",
+    address: "",
+    city: "",
+    state: "",
+    pincode: "",
     gstin: "",
     phone: "",
-    mobile: "",
     email: "",
-    gst_treatment: "business_gst",
-    payment_terms: "Due on Receipt",
   });
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
 
   useEffect(() => {
-    if (selected) setQuery(selected.display_name ?? "");
+    if (selected) setQuery(selected.name);
   }, [selected]);
 
   const search = useCallback(async (q: string) => {
     setLoading(true);
     try {
-      const r = await fetch(
-        `/api/customers?q=${encodeURIComponent(q)}&limit=30`,
-      );
+      const r = await fetch(`/api/customers?q=${encodeURIComponent(q)}`);
       const d = await r.json();
       setResults(d.customers ?? []);
     } catch {}
@@ -136,7 +125,7 @@ function CustomerSearch({
     setQuery(v);
     setOpen(true);
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => search(v), 200);
+    timerRef.current = setTimeout(() => search(v), 250);
   };
 
   useEffect(() => {
@@ -152,7 +141,7 @@ function CustomerSearch({
 
   const choose = (c: Customer) => {
     onSelect(c);
-    setQuery(c.display_name);
+    setQuery(c.name);
     setOpen(false);
     setShowNewForm(false);
   };
@@ -165,7 +154,7 @@ function CustomerSearch({
   };
 
   const saveNew = async () => {
-    if (!nc.display_name.trim()) {
+    if (!nc.name.trim()) {
       setSaveErr("Name is required");
       return;
     }
@@ -186,18 +175,14 @@ function CustomerSearch({
       choose(d.customer);
       setShowNewForm(false);
       setNc({
-        display_name: "",
-        company_name: "",
-        billing_address: "",
-        billing_city: "",
-        billing_state: "",
-        billing_pincode: "",
+        name: "",
+        address: "",
+        city: "",
+        state: "",
+        pincode: "",
         gstin: "",
         phone: "",
-        mobile: "",
         email: "",
-        gst_treatment: "business_gst",
-        payment_terms: "Due on Receipt",
       });
     } catch {
       setSaveErr("Network error");
@@ -205,21 +190,9 @@ function CustomerSearch({
     setSaving(false);
   };
 
-  const gstLabel = (t?: string) => {
-    const m: Record<string, string> = {
-      business_gst: "GST Reg",
-      business_none: "Unreg",
-      overseas: "Overseas",
-      consumer: "Consumer",
-      business_registered_composition: "Composition",
-    };
-    return t ? (m[t] ?? t) : "";
-  };
-
   return (
     <div ref={wrapRef} style={{ position: "relative" }}>
       {selected ? (
-        // ── Selected customer card ─────────────────────────────────────────
         <div
           style={{
             background: "rgba(59,130,246,0.08)",
@@ -232,22 +205,8 @@ function CustomerSearch({
           }}
         >
           <div>
-            <div style={{ fontWeight: 600, fontSize: 13 }}>
-              {selected.display_name}
-            </div>
-            {selected.company_name &&
-              selected.company_name !== selected.display_name && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "var(--text-dim)",
-                    marginTop: 1,
-                  }}
-                >
-                  {selected.company_name}
-                </div>
-              )}
-            {(selected.billing_city || selected.billing_state) && (
+            <div style={{ fontWeight: 600, fontSize: 13 }}>{selected.name}</div>
+            {selected.address && (
               <div
                 style={{
                   fontSize: 11,
@@ -256,64 +215,23 @@ function CustomerSearch({
                 }}
               >
                 {[
-                  selected.billing_address,
-                  selected.billing_city,
-                  selected.billing_state,
-                  selected.billing_pincode,
+                  selected.address,
+                  selected.city,
+                  selected.state,
+                  selected.pincode,
                 ]
                   .filter(Boolean)
                   .join(", ")}
               </div>
             )}
-            <div
-              style={{
-                display: "flex",
-                gap: 10,
-                marginTop: 2,
-                flexWrap: "wrap",
-              }}
-            >
-              {selected.gstin && (
-                <span
-                  style={{
-                    fontSize: 11,
-                    color: "var(--text-muted)",
-                    fontFamily: "monospace",
-                  }}
-                >
-                  GSTIN: {selected.gstin}
-                </span>
-              )}
-              {selected.gst_treatment && (
-                <span
-                  style={{
-                    fontSize: 10,
-                    padding: "1px 6px",
-                    borderRadius: 4,
-                    background: "rgba(59,130,246,0.1)",
-                    color: "var(--accent)",
-                  }}
-                >
-                  {gstLabel(selected.gst_treatment)}
-                </span>
-              )}
-              {selected.place_of_contact_label && (
-                <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                  POS: {selected.place_of_contact_label}
-                </span>
-              )}
-            </div>
-            {(selected.phone || selected.mobile || selected.email) && (
-              <div
-                style={{
-                  fontSize: 11,
-                  color: "var(--text-muted)",
-                  marginTop: 2,
-                }}
-              >
-                {[selected.phone || selected.mobile, selected.email]
-                  .filter(Boolean)
-                  .join(" · ")}
+            {selected.gstin && (
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                GSTIN: {selected.gstin}
+              </div>
+            )}
+            {(selected.phone || selected.email) && (
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {[selected.phone, selected.email].filter(Boolean).join(" · ")}
               </div>
             )}
           </div>
@@ -324,7 +242,7 @@ function CustomerSearch({
               border: "none",
               color: "var(--text-muted)",
               cursor: "pointer",
-              fontSize: 18,
+              fontSize: 16,
               lineHeight: 1,
               padding: "0 4px",
               flexShrink: 0,
@@ -338,13 +256,12 @@ function CustomerSearch({
           <input
             type="text"
             value={query}
-            placeholder="Search by customer name, GSTIN or city…"
+            placeholder="Search customer by name or GSTIN…"
             onChange={handleInput}
             onFocus={() => {
               setOpen(true);
               if (!query) search("");
             }}
-            autoComplete="off"
           />
           {open && (
             <div
@@ -359,30 +276,17 @@ function CustomerSearch({
                 borderRadius: 8,
                 boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
                 overflow: "hidden",
-                maxHeight: 280,
-                overflowY: "auto",
               }}
             >
               {loading && (
                 <div
                   style={{
-                    padding: "10px 12px",
+                    padding: "8px 12px",
                     fontSize: 11,
                     color: "var(--text-muted)",
                   }}
                 >
                   Searching…
-                </div>
-              )}
-              {!loading && results.length === 0 && query && (
-                <div
-                  style={{
-                    padding: "10px 12px",
-                    fontSize: 11,
-                    color: "var(--text-muted)",
-                  }}
-                >
-                  No customers found for "{query}"
                 </div>
               )}
               {!loading &&
@@ -404,50 +308,10 @@ function CustomerSearch({
                       (e.currentTarget.style.background = "transparent")
                     }
                   >
-                    <div
-                      style={{
-                        fontWeight: 500,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                      }}
-                    >
-                      {c.display_name}
-                      {c.gst_treatment && (
-                        <span
-                          style={{
-                            fontSize: 9,
-                            padding: "1px 5px",
-                            borderRadius: 4,
-                            background: "rgba(59,130,246,0.1)",
-                            color: "var(--accent)",
-                            fontWeight: 600,
-                          }}
-                        >
-                          {gstLabel(c.gst_treatment)}
-                        </span>
-                      )}
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 10,
-                        color: "var(--text-muted)",
-                        marginTop: 2,
-                        display: "flex",
-                        gap: 8,
-                      }}
-                    >
-                      {c.billing_city && (
-                        <span>
-                          {c.billing_city}
-                          {c.billing_state ? `, ${c.billing_state}` : ""}
-                        </span>
-                      )}
-                      {c.gstin && (
-                        <span style={{ fontFamily: "monospace" }}>
-                          {c.gstin}
-                        </span>
-                      )}
+                    <div style={{ fontWeight: 500 }}>{c.name}</div>
+                    <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                      {[c.city, c.state].filter(Boolean).join(", ")}
+                      {c.gstin ? ` · GSTIN: ${c.gstin}` : ""}
                     </div>
                   </div>
                 ))}
@@ -455,8 +319,7 @@ function CustomerSearch({
                 <div
                   onMouseDown={() => {
                     setShowNewForm(true);
-                    setOpen(false);
-                    setNc((n) => ({ ...n, display_name: query }));
+                    setNc((n) => ({ ...n, name: query }));
                   }}
                   style={{
                     padding: "9px 12px",
@@ -472,13 +335,12 @@ function CustomerSearch({
                     (e.currentTarget.style.background = "transparent")
                   }
                 >
-                  + Add "{query || "new customer"}"
+                  + Add new customer
                 </div>
               )}
             </div>
           )}
 
-          {/* ── Quick new-customer form ───────────────────────────────────── */}
           {showNewForm && (
             <div
               style={{
@@ -492,14 +354,14 @@ function CustomerSearch({
               <div
                 style={{
                   fontSize: 10,
-                  fontWeight: 600,
+                  fontWeight: 500,
                   color: "var(--text-muted)",
                   textTransform: "uppercase",
                   letterSpacing: "0.05em",
                   marginBottom: 10,
                 }}
               >
-                New customer — quick add
+                New customer
               </div>
               <div
                 style={{
@@ -508,52 +370,48 @@ function CustomerSearch({
                   gap: 8,
                 }}
               >
-                <FG label="Display / Company name" full>
+                <FG label="Company / Customer name" full>
                   <input
                     autoFocus
-                    value={nc.display_name}
+                    value={nc.name}
                     onChange={(e) =>
-                      setNc((n) => ({
-                        ...n,
-                        display_name: e.target.value,
-                        company_name: e.target.value,
-                      }))
+                      setNc((n) => ({ ...n, name: e.target.value }))
                     }
                     placeholder="e.g. Matha Electronics"
                   />
                 </FG>
-                <FG label="Billing address" full>
+                <FG label="Address" full>
                   <input
-                    value={nc.billing_address}
+                    value={nc.address}
                     onChange={(e) =>
-                      setNc((n) => ({ ...n, billing_address: e.target.value }))
+                      setNc((n) => ({ ...n, address: e.target.value }))
                     }
                     placeholder="Street address"
                   />
                 </FG>
                 <FG label="City">
                   <input
-                    value={nc.billing_city}
+                    value={nc.city}
                     onChange={(e) =>
-                      setNc((n) => ({ ...n, billing_city: e.target.value }))
+                      setNc((n) => ({ ...n, city: e.target.value }))
                     }
-                    placeholder="Ernakulam"
+                    placeholder="e.g. Ernakulam"
                   />
                 </FG>
                 <FG label="State">
                   <input
-                    value={nc.billing_state}
+                    value={nc.state}
                     onChange={(e) =>
-                      setNc((n) => ({ ...n, billing_state: e.target.value }))
+                      setNc((n) => ({ ...n, state: e.target.value }))
                     }
-                    placeholder="Kerala"
+                    placeholder="e.g. Kerala"
                   />
                 </FG>
                 <FG label="Pincode">
                   <input
-                    value={nc.billing_pincode}
+                    value={nc.pincode}
                     onChange={(e) =>
-                      setNc((n) => ({ ...n, billing_pincode: e.target.value }))
+                      setNc((n) => ({ ...n, pincode: e.target.value }))
                     }
                     placeholder="682016"
                   />
@@ -568,18 +426,13 @@ function CustomerSearch({
                       }))
                     }
                     placeholder="32ACEPJ7316E1Z2"
-                    style={{ fontFamily: "monospace" }}
                   />
                 </FG>
-                <FG label="Phone / Mobile">
+                <FG label="Phone">
                   <input
                     value={nc.phone}
                     onChange={(e) =>
-                      setNc((n) => ({
-                        ...n,
-                        phone: e.target.value,
-                        mobile: e.target.value,
-                      }))
+                      setNc((n) => ({ ...n, phone: e.target.value }))
                     }
                     placeholder="9591119333"
                   />
@@ -591,40 +444,8 @@ function CustomerSearch({
                     onChange={(e) =>
                       setNc((n) => ({ ...n, email: e.target.value }))
                     }
-                    placeholder="contact@company.com"
+                    placeholder="buyer@example.com"
                   />
-                </FG>
-                <FG label="GST treatment">
-                  <select
-                    value={nc.gst_treatment}
-                    onChange={(e) =>
-                      setNc((n) => ({ ...n, gst_treatment: e.target.value }))
-                    }
-                  >
-                    <option value="business_gst">
-                      Registered Business - Regular
-                    </option>
-                    <option value="business_none">Unregistered Business</option>
-                    <option value="overseas">Overseas</option>
-                    <option value="consumer">Consumer</option>
-                    <option value="business_registered_composition">
-                      Composition
-                    </option>
-                  </select>
-                </FG>
-                <FG label="Payment terms">
-                  <select
-                    value={nc.payment_terms}
-                    onChange={(e) =>
-                      setNc((n) => ({ ...n, payment_terms: e.target.value }))
-                    }
-                  >
-                    <option>Due on Receipt</option>
-                    <option>Net 15</option>
-                    <option>Net 30</option>
-                    <option>Net 45</option>
-                    <option>Net 60</option>
-                  </select>
                 </FG>
               </div>
               {saveErr && (
@@ -640,20 +461,10 @@ function CustomerSearch({
               )}
               <div
                 style={{
-                  fontSize: 10,
-                  color: "var(--text-muted)",
-                  marginTop: 8,
-                }}
-              >
-                Full address, shipping details and more can be edited in the{" "}
-                <strong>Customers</strong> screen.
-              </div>
-              <div
-                style={{
                   display: "flex",
                   gap: 8,
                   justifyContent: "flex-end",
-                  marginTop: 10,
+                  marginTop: 12,
                 }}
               >
                 <button
@@ -669,7 +480,7 @@ function CustomerSearch({
                   onClick={saveNew}
                   disabled={saving}
                 >
-                  {saving ? "Saving…" : "Create & select"}
+                  {saving ? "Saving…" : "Save customer"}
                 </button>
               </div>
             </div>
@@ -680,7 +491,7 @@ function CustomerSearch({
   );
 }
 
-// ─── Model combobox ───────────────────────────────────────────────────────────
+// ─── Model combobox ────────────────────────────────────────────────────────────
 function ModelCombobox({
   products,
   value,
@@ -800,7 +611,7 @@ function ModelCombobox({
   );
 }
 
-// ─── Main component ───────────────────────────────────────────────────────────
+// ─── Main component ────────────────────────────────────────────────────────────
 export default function RecordSale({ products, onSuccess }: Props) {
   const today = new Date().toISOString().split("T")[0];
   const yr = new Date().getFullYear();
@@ -814,22 +625,67 @@ export default function RecordSale({ products, onSuccess }: Props) {
   const [gstRate, setGstRate] = useState(18);
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<LineItem[]>([emptyLine()]);
-  // Packing, forwarding & transport charges (ex-GST) — stored as separate
-  // named amounts, combined into a single "Charges" line item on the invoice
-  const [packingCharges, setPackingCharges] = useState<number | "">("");
-  const [forwardingCharges, setForwardingCharges] = useState<number | "">("");
-  const [transportCharges, setTransportCharges] = useState<number | "">("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  // Charges breakdown (ex-GST each)
-  const packingAmt = +(packingCharges || 0);
-  const forwardingAmt = +(forwardingCharges || 0);
-  const transportAmt = +(transportCharges || 0);
-  const totalCharges = packingAmt + forwardingAmt + transportAmt;
+  // ── Invoice Import (Claude JSON / Excel) ──────────────────────────────────
+  const [showImport, setShowImport] = useState(false);
+  const [importNote, setImportNote] = useState("");
 
-  const productSubtotal = useMemo(
+  const handleImported = (data: ImportedInvoice) => {
+    // Header fields
+    if (data.invoiceNumber) setInvoiceNum(data.invoiceNumber);
+    if (data.invoiceDate) setInvoiceDate(data.invoiceDate);
+    if (data.dueDate) setDueDate(data.dueDate);
+    else if (data.invoiceDate) setDueDate(data.invoiceDate);
+    if (data.notes) setNotes(data.notes);
+    if (data.gstRate) setGstRate(data.gstRate);
+
+    // Map ALL line items — match against catalogue for itemCode/hsn/description
+    const importedLines: LineItem[] = data.lineItems.map((item) => {
+      const catalogueMatch = products.find(
+        (p) =>
+          String(p.model).toLowerCase() === String(item.model).toLowerCase(),
+      );
+      const qty = Math.max(1, Number(item.qty) || 1);
+
+      // Serial numbers: comma-separated string → array, padded to qty
+      const sns = (item.serialNumbers ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const serialNumbers = Array.from({ length: qty }, (_, i) => sns[i] ?? "");
+
+      return {
+        model: catalogueMatch?.model ?? item.model,
+        itemCode: catalogueMatch?.itemCode ?? "",
+        hsn: item.hsn || catalogueMatch?.hsn || "",
+        description: item.description || catalogueMatch?.description || "",
+        qty,
+        unitSalePrice: Number(item.unitPrice) || 0,
+        discount: Number(item.discount) || 0,
+        serialNumbers,
+        warranty: catalogueMatch?.warranty
+          ? String(catalogueMatch.warranty)
+          : "",
+      };
+    });
+
+    if (importedLines.length > 0) setLines(importedLines);
+
+    // Customer note — importing can't auto-select a Supabase customer,
+    // so show a hint with the extracted name for manual selection
+    if (data.vendorOrCustomer) {
+      setImportNote(
+        `Imported customer name: "${data.vendorOrCustomer}" — search and select them below (or add as new).`,
+      );
+    }
+
+    setShowImport(false);
+  };
+
+  const subtotal = useMemo(
     () =>
       lines.reduce(
         (s, l) => s + l.qty * l.unitSalePrice * (1 - l.discount / 100),
@@ -837,8 +693,6 @@ export default function RecordSale({ products, onSuccess }: Props) {
       ),
     [lines],
   );
-  // Subtotal = products + charges (all ex-GST), GST applied uniformly
-  const subtotal = productSubtotal + totalCharges;
   const gstAmt = (subtotal * gstRate) / 100;
   const total = subtotal + gstAmt;
 
@@ -900,34 +754,6 @@ export default function RecordSale({ products, onSuccess }: Props) {
     setLoading(true);
     setError("");
 
-    // Build charges line items — only include non-zero charges
-    const chargeLines: Array<{ label: string; amount: number }> = [];
-    if (packingAmt > 0)
-      chargeLines.push({
-        label: "Packing & Forwarding Charges",
-        amount: packingAmt,
-      });
-    if (forwardingAmt > 0 && packingAmt === 0)
-      chargeLines.push({ label: "Forwarding Charges", amount: forwardingAmt });
-    if (transportAmt > 0)
-      chargeLines.push({
-        label: "Transportation Charges",
-        amount: transportAmt,
-      });
-    // If both packing and forwarding are set, combine label
-    const charges =
-      packingAmt > 0 && forwardingAmt > 0
-        ? [
-            {
-              label: "Packing & Forwarding Charges",
-              amount: packingAmt + forwardingAmt,
-            },
-            ...(transportAmt > 0
-              ? [{ label: "Transportation Charges", amount: transportAmt }]
-              : []),
-          ]
-        : chargeLines;
-
     try {
       const res = await fetch("/api/invoices", {
         method: "POST",
@@ -950,7 +776,6 @@ export default function RecordSale({ products, onSuccess }: Props) {
             serialNumbers: l.serialNumbers.filter((s) => s.trim()),
             warranty: l.warranty,
           })),
-          charges, // ← packing / forwarding / transport
           subtotal,
           gst_rate: gstRate,
           gst_amount: gstAmt,
@@ -1002,9 +827,41 @@ export default function RecordSale({ products, onSuccess }: Props) {
         @media (max-width: 720px) { .rs-line-grid { grid-template-columns: 1fr 1fr !important; } }
       `}</style>
 
+      {/* ── Import modal ── */}
+      {showImport && (
+        <InvoiceImport
+          mode="sale"
+          products={products}
+          onImported={handleImported}
+          onClose={() => setShowImport(false)}
+        />
+      )}
+
       {/* Invoice header */}
       <div style={card}>
-        <div style={sectionLabel}>Invoice details</div>
+        <div
+          style={{
+            ...sectionLabel,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <span>Invoice details</span>
+          <button
+            className="btn-ghost"
+            style={{
+              fontSize: 11,
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+            }}
+            onClick={() => setShowImport(true)}
+            type="button"
+          >
+            📥 Import Invoice (Claude JSON / Excel)
+          </button>
+        </div>
         <div
           style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
         >
@@ -1062,6 +919,36 @@ export default function RecordSale({ products, onSuccess }: Props) {
       {/* Customer */}
       <div style={card}>
         <div style={sectionLabel}>Bill to / Ship to</div>
+        {importNote && (
+          <div
+            style={{
+              marginBottom: 8,
+              padding: "8px 10px",
+              borderRadius: 6,
+              fontSize: 11,
+              background: "rgba(59,130,246,0.08)",
+              border: "1px solid rgba(59,130,246,0.3)",
+              color: "var(--accent)",
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 8,
+            }}
+          >
+            <span>💡 {importNote}</span>
+            <button
+              onClick={() => setImportNote("")}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
         <CustomerSearch selected={customer} onSelect={setCustomer} />
       </div>
 
@@ -1302,112 +1189,6 @@ export default function RecordSale({ products, onSuccess }: Props) {
           })}
         </div>
 
-        {/* ── Packing / Transport charges ───────────────────────────── */}
-        <div
-          style={{
-            marginTop: 12,
-            background: "var(--bg-input)",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            padding: "10px 12px",
-          }}
-        >
-          <div
-            style={{
-              fontSize: 10,
-              fontWeight: 600,
-              color: "var(--text-muted)",
-              textTransform: "uppercase",
-              letterSpacing: "0.05em",
-              marginBottom: 8,
-            }}
-          >
-            Packing, Forwarding &amp; Transport charges
-            <span
-              style={{
-                marginLeft: 6,
-                fontWeight: 400,
-                textTransform: "none",
-                letterSpacing: 0,
-              }}
-            >
-              — ex-GST · same GST rate applies · leave blank if not charged
-            </span>
-          </div>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr",
-              gap: 8,
-            }}
-          >
-            <FG label="Packing charges (₹)">
-              <input
-                type="number"
-                min={0}
-                value={packingCharges === "" ? "" : String(packingCharges)}
-                placeholder="e.g. 250"
-                onChange={(e) =>
-                  setPackingCharges(
-                    e.target.value === "" ? "" : +e.target.value,
-                  )
-                }
-              />
-            </FG>
-            <FG label="Forwarding charges (₹)">
-              <input
-                type="number"
-                min={0}
-                value={
-                  forwardingCharges === "" ? "" : String(forwardingCharges)
-                }
-                placeholder="e.g. 150"
-                onChange={(e) =>
-                  setForwardingCharges(
-                    e.target.value === "" ? "" : +e.target.value,
-                  )
-                }
-              />
-            </FG>
-            <FG label="Transportation charges (₹)">
-              <input
-                type="number"
-                min={0}
-                value={transportCharges === "" ? "" : String(transportCharges)}
-                placeholder="e.g. 500"
-                onChange={(e) =>
-                  setTransportCharges(
-                    e.target.value === "" ? "" : +e.target.value,
-                  )
-                }
-              />
-            </FG>
-          </div>
-          {totalCharges > 0 && (
-            <div
-              style={{
-                marginTop: 8,
-                display: "flex",
-                justifyContent: "flex-end",
-                gap: 16,
-                fontSize: 11,
-                color: "var(--text-dim)",
-              }}
-            >
-              <span>
-                Total charges (ex-GST):{" "}
-                <strong style={{ color: "var(--text)" }}>
-                  ₹{fmt(totalCharges)}
-                </strong>{" "}
-                + GST {gstRate}% ={" "}
-                <strong style={{ color: "var(--text)" }}>
-                  ₹{fmt(totalCharges * (1 + gstRate / 100))}
-                </strong>
-              </span>
-            </div>
-          )}
-        </div>
-
         {/* Totals block */}
         <div
           style={{ marginTop: 14, display: "flex", justifyContent: "flex-end" }}
@@ -1417,7 +1198,7 @@ export default function RecordSale({ products, onSuccess }: Props) {
               background: "var(--bg-input)",
               borderRadius: 8,
               padding: "10px 16px",
-              minWidth: 280,
+              minWidth: 260,
               display: "flex",
               flexDirection: "column",
               gap: 5,
@@ -1431,66 +1212,9 @@ export default function RecordSale({ products, onSuccess }: Props) {
                 color: "var(--text-dim)",
               }}
             >
-              <span>Products sub-total (ex-GST)</span>
-              <span>₹{fmt(productSubtotal)}</span>
+              <span>Sub total (ex-GST)</span>
+              <span>₹{fmt(subtotal)}</span>
             </div>
-            {totalCharges > 0 && (
-              <>
-                {packingAmt > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    <span>Packing charges</span>
-                    <span>₹{fmt(packingAmt)}</span>
-                  </div>
-                )}
-                {forwardingAmt > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    <span>Forwarding charges</span>
-                    <span>₹{fmt(forwardingAmt)}</span>
-                  </div>
-                )}
-                {transportAmt > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    <span>Transportation charges</span>
-                    <span>₹{fmt(transportAmt)}</span>
-                  </div>
-                )}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontSize: 12,
-                    color: "var(--text-dim)",
-                    borderTop: "1px dashed var(--border)",
-                    paddingTop: 4,
-                    marginTop: 2,
-                  }}
-                >
-                  <span>Sub-total incl. charges (ex-GST)</span>
-                  <span>₹{fmt(subtotal)}</span>
-                </div>
-              </>
-            )}
             <div
               style={{
                 display: "flex",
@@ -1582,10 +1306,8 @@ export default function RecordSale({ products, onSuccess }: Props) {
             setLines([emptyLine()]);
             setCustomer(null);
             setNotes("");
-            setPackingCharges("");
-            setForwardingCharges("");
-            setTransportCharges("");
             setError("");
+            setImportNote("");
           }}
         >
           Clear

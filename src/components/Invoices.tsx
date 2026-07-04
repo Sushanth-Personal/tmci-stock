@@ -1,10 +1,10 @@
 "use client";
 import React from "react";
 // src/components/Invoices.tsx
-// Full invoices screen — two tabs: Pending dispatch + All invoices
-// Left: list panel. Right: invoice detail panel (not a modal).
+// Full invoices screen -- two tabs: Pending dispatch + All invoices
+// Left: list panel with search + sort. Right: invoice detail panel.
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 
 interface LineItem {
   model: string;
@@ -45,22 +45,21 @@ const fmtDate = (iso: string) =>
   });
 
 const fmtMoney = (n: number) =>
-  "₹" +
+  "Rs. " +
   n.toLocaleString("en-IN", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
 
 const fmtShort = (n: number) => {
-  if (n >= 100000) return `₹${(n / 100000).toFixed(1)}L`;
-  if (n >= 1000) return `₹${(n / 1000).toFixed(1)}K`;
-  return `₹${Math.round(n).toLocaleString("en-IN")}`;
+  if (n >= 100000) return `Rs.${(n / 100000).toFixed(1)}L`;
+  if (n >= 1000) return `Rs.${(n / 1000).toFixed(1)}K`;
+  return `Rs.${Math.round(n).toLocaleString("en-IN")}`;
 };
 
-const STATUS_META: Record<
-  string,
-  { label: string; color: string; bg: string }
-> = {
+type StatusMeta = { label: string; color: string; bg: string };
+
+const STATUS_META: Record<string, StatusMeta> = {
   pending_dispatch: {
     label: "Pending dispatch",
     color: "var(--accent-amber)",
@@ -78,16 +77,65 @@ const STATUS_META: Record<
   },
 };
 
-// ─── Invoice detail panel ─────────────────────────────────────────────────────
+// ── Sort options ──────────────────────────────────────────────────────────────
+type SortKey = "date" | "customer" | "total" | "invoiceNo";
+type SortDir = "asc" | "desc";
+
+const SORT_LABELS: Record<SortKey, string> = {
+  date: "Date",
+  customer: "Customer name",
+  total: "Total value",
+  invoiceNo: "Invoice number",
+};
+
+function getCustomerName(inv: Invoice): string {
+  return (
+    inv.customer_snapshot?.display_name || inv.customer_snapshot?.name || ""
+  );
+}
+
+function matchesSearch(inv: Invoice, q: string): boolean {
+  const needle = q.toLowerCase();
+  // Invoice number
+  if (inv.invoice_number.toLowerCase().includes(needle)) return true;
+  // Customer name
+  if (getCustomerName(inv).toLowerCase().includes(needle)) return true;
+  // Customer GSTIN
+  if (inv.customer_snapshot?.gstin?.toLowerCase().includes(needle)) return true;
+  // Notes / subject
+  if (inv.notes?.toLowerCase().includes(needle)) return true;
+  // Any product model or description in line items
+  if (
+    inv.line_items.some(
+      (l) =>
+        l.model?.toLowerCase().includes(needle) ||
+        l.description?.toLowerCase().includes(needle) ||
+        l.hsn?.toLowerCase().includes(needle),
+    )
+  )
+    return true;
+  // Serial numbers
+  if (
+    inv.line_items.some((l) =>
+      l.serialNumbers?.some((sn) => sn?.toLowerCase().includes(needle)),
+    )
+  )
+    return true;
+  return false;
+}
+
+// --- Invoice detail panel ---------------------------------------------------
 function InvoiceDetail({
   invoice,
   onDispatched,
   onCancelled,
+  onDeleted,
   onClose,
 }: {
   invoice: Invoice;
   onDispatched: () => void;
   onCancelled: () => void;
+  onDeleted: () => void;
   onClose: () => void;
 }) {
   const [dispatchDate, setDispatchDate] = useState(
@@ -96,9 +144,14 @@ function InvoiceDetail({
   const [dispatching, setDispatching] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [undoing, setUndoing] = useState(false);
+  const [confirmUndo, setConfirmUndo] = useState(false);
   const [error, setError] = useState("");
 
   const isPending = invoice.status === "pending_dispatch";
+  const isDispatched = invoice.status === "dispatched";
   const sm = STATUS_META[invoice.status] ?? STATUS_META.pending_dispatch;
   const customer = invoice.customer_snapshot;
 
@@ -151,6 +204,47 @@ function InvoiceDetail({
       setError("Network error.");
       setCancelling(false);
     }
+  };
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    setError("");
+    try {
+      const r = await fetch(`/api/invoices/${invoice.id}/bin`, {
+        method: "POST",
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        setError(d.error || "Failed to move to bin");
+        setDeleting(false);
+        return;
+      }
+      onDeleted();
+    } catch {
+      setError("Network error.");
+      setDeleting(false);
+    }
+  };
+
+  const handleUndoDispatch = async () => {
+    setUndoing(true);
+    setError("");
+    try {
+      const r = await fetch(`/api/invoices/${invoice.id}/undo-dispatch`, {
+        method: "POST",
+      });
+      const d = await r.json();
+      if (!r.ok) {
+        setError(d.error || "Undo failed");
+        setUndoing(false);
+        return;
+      }
+      if (d.warning) setError(`✓ Undone. ${d.warning}`);
+      onDispatched();
+    } catch {
+      setError("Network error.");
+    }
+    setUndoing(false);
   };
 
   return (
@@ -220,8 +314,8 @@ function InvoiceDetail({
             >
               {fmtDate(invoice.invoice_date)}
               {invoice.dispatched_at &&
-                ` · Dispatched ${fmtDate(invoice.dispatched_at)}`}
-              {invoice.notes && ` · ${invoice.notes}`}
+                ` - Dispatched ${fmtDate(invoice.dispatched_at)}`}
+              {invoice.notes && ` - ${invoice.notes}`}
             </div>
           </div>
           <button
@@ -236,7 +330,7 @@ function InvoiceDetail({
               flexShrink: 0,
             }}
           >
-            ×
+            x
           </button>
         </div>
       </div>
@@ -252,7 +346,6 @@ function InvoiceDetail({
           gap: 12,
         }}
       >
-        {/* Customer */}
         {customer && (
           <div
             style={{
@@ -311,7 +404,6 @@ function InvoiceDetail({
           </div>
         )}
 
-        {/* Line items */}
         <div
           style={{
             border: "1px solid var(--border)",
@@ -373,7 +465,7 @@ function InvoiceDetail({
                               color: "var(--accent-amber)",
                             }}
                           >
-                            → {fmtMoney(eff)}
+                            -&gt; {fmtMoney(eff)}
                           </div>
                         )}
                       </td>
@@ -386,7 +478,7 @@ function InvoiceDetail({
                               : "var(--text-muted)",
                         }}
                       >
-                        {l.discount > 0 ? `${l.discount}%` : "—"}
+                        {l.discount > 0 ? `${l.discount}%` : "-"}
                       </td>
                       <td style={{ textAlign: "right", fontWeight: 500 }}>
                         {fmtMoney(eff * l.qty)}
@@ -434,7 +526,7 @@ function InvoiceDetail({
                   key={`charge-${ci}`}
                   style={{ background: "rgba(255,255,255,0.01)" }}
                 >
-                  <td style={{ color: "var(--text-muted)" }}>—</td>
+                  <td style={{ color: "var(--text-muted)" }}>-</td>
                   <td
                     colSpan={3}
                     style={{ color: "var(--text-dim)", fontStyle: "italic" }}
@@ -445,7 +537,7 @@ function InvoiceDetail({
                   <td
                     style={{ textAlign: "right", color: "var(--text-muted)" }}
                   >
-                    —
+                    -
                   </td>
                   <td style={{ textAlign: "right", fontWeight: 500 }}>
                     {fmtMoney(c.amount)}
@@ -456,7 +548,6 @@ function InvoiceDetail({
           </table>
         </div>
 
-        {/* Totals */}
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <div
             style={{
@@ -524,7 +615,6 @@ function InvoiceDetail({
           </div>
         </div>
 
-        {/* Dispatch section */}
         {isPending && (
           <div
             style={{
@@ -580,7 +670,7 @@ function InvoiceDetail({
                 onClick={handleDispatch}
                 disabled={dispatching}
               >
-                {dispatching ? "Dispatching…" : "✓ Mark as dispatched"}
+                {dispatching ? "Dispatching..." : "Mark as dispatched"}
               </button>
             </div>
             <div
@@ -592,8 +682,97 @@ function InvoiceDetail({
               }}
             >
               Deducts{" "}
-              {invoice.line_items.map((l) => `${l.qty}× ${l.model}`).join(", ")}{" "}
+              {invoice.line_items.map((l) => `${l.qty}x ${l.model}`).join(", ")}{" "}
               from {invoice.location} via FIFO and logs the sale.
+            </div>
+          </div>
+        )}
+
+        {isDispatched && !confirmUndo && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+              padding: "10px 12px",
+              background: "rgba(245,158,11,0.06)",
+              border: "1px solid rgba(245,158,11,0.25)",
+              borderRadius: 8,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-dim)",
+                lineHeight: 1.6,
+              }}
+            >
+              This invoice is dispatched — stock has been deducted via FIFO. If
+              it was marked dispatched by mistake, you can undo it: stock is
+              restored and the invoice returns to Pending Dispatch.
+            </div>
+            <button
+              className="btn-ghost"
+              style={{
+                fontSize: 11,
+                color: "var(--accent-amber)",
+                borderColor: "rgba(245,158,11,0.3)",
+                alignSelf: "flex-start",
+              }}
+              onClick={() => setConfirmUndo(true)}
+            >
+              ↺ Undo dispatch (restore stock)
+            </button>
+          </div>
+        )}
+
+        {confirmUndo && (
+          <div
+            style={{
+              background: "rgba(245,158,11,0.07)",
+              border: "1px solid rgba(245,158,11,0.3)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              fontSize: 12,
+            }}
+          >
+            <div
+              style={{
+                fontWeight: 600,
+                color: "var(--accent-amber)",
+                marginBottom: 8,
+              }}
+            >
+              Undo this dispatch?
+            </div>
+            <div
+              style={{
+                color: "var(--text-muted)",
+                marginBottom: 10,
+                lineHeight: 1.6,
+              }}
+            >
+              Stock will be added back to the most recent open lot for each item
+              (or a new lot if none exists — flagged for cost review). The Sale
+              transactions will be removed, and the invoice returns to Pending
+              Dispatch so you can fix it and dispatch again.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="btn-ghost"
+                style={{ fontSize: 11 }}
+                onClick={() => setConfirmUndo(false)}
+              >
+                Go back
+              </button>
+              <button
+                className="btn-primary"
+                style={{ fontSize: 11, background: "var(--accent-amber)" }}
+                onClick={handleUndoDispatch}
+                disabled={undoing}
+              >
+                {undoing ? "Undoing…" : "Yes, undo dispatch"}
+              </button>
             </div>
           </div>
         )}
@@ -613,15 +792,14 @@ function InvoiceDetail({
           </div>
         )}
 
-        {/* Cancel */}
-        {isPending && !confirmCancel && (
+        {isPending && !confirmCancel && !confirmDelete && (
           <div style={{ display: "flex", justifyContent: "flex-start" }}>
             <button
               className="btn-ghost"
               style={{
                 fontSize: 11,
-                color: "var(--accent-red)",
-                borderColor: "rgba(239,68,68,0.3)",
+                color: "var(--accent-amber)",
+                borderColor: "rgba(245,158,11,0.3)",
               }}
               onClick={() => setConfirmCancel(true)}
             >
@@ -665,7 +843,65 @@ function InvoiceDetail({
                 onClick={handleCancel}
                 disabled={cancelling}
               >
-                {cancelling ? "Cancelling…" : "Yes, cancel"}
+                {cancelling ? "Cancelling..." : "Yes, cancel"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!isDispatched && !confirmDelete && !confirmCancel && (
+          <div style={{ display: "flex", justifyContent: "flex-start" }}>
+            <button
+              className="btn-ghost"
+              style={{
+                fontSize: 11,
+                color: "var(--accent-red)",
+                borderColor: "rgba(239,68,68,0.3)",
+              }}
+              onClick={() => setConfirmDelete(true)}
+            >
+              Delete invoice
+            </button>
+          </div>
+        )}
+        {confirmDelete && (
+          <div
+            style={{
+              background: "rgba(239,68,68,0.07)",
+              border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 8,
+              padding: "10px 14px",
+              fontSize: 12,
+            }}
+          >
+            <div
+              style={{
+                fontWeight: 600,
+                color: "var(--accent-red)",
+                marginBottom: 8,
+              }}
+            >
+              Move this invoice to Bin?
+            </div>
+            <div style={{ color: "var(--text-muted)", marginBottom: 10 }}>
+              It'll be recoverable from the Bin (under Admin) for 30 days, then
+              permanently deleted.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                className="btn-ghost"
+                style={{ fontSize: 11 }}
+                onClick={() => setConfirmDelete(false)}
+              >
+                Go back
+              </button>
+              <button
+                className="btn-primary"
+                style={{ fontSize: 11, background: "var(--accent-red)" }}
+                onClick={handleDelete}
+                disabled={deleting}
+              >
+                {deleting ? "Moving to bin..." : "Yes, move to bin"}
               </button>
             </div>
           </div>
@@ -675,7 +911,7 @@ function InvoiceDetail({
   );
 }
 
-// ─── Main Invoices screen ─────────────────────────────────────────────────────
+// --- Main Invoices screen ----------------------------------------------------
 export default function Invoices({
   onStockChanged,
 }: {
@@ -687,12 +923,18 @@ export default function Invoices({
   const [selected, setSelected] = useState<Invoice | null>(null);
   const [toast, setToast] = useState("");
 
+  // ── Search + sort state ────────────────────────────────────────────────────
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("date");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
+
   const load = useCallback(async (status?: string) => {
     setLoading(true);
     try {
       const url = status
-        ? `/api/invoices?status=${status}&limit=100`
-        : "/api/invoices?limit=100";
+        ? `/api/invoices?status=${status}&limit=200`
+        : "/api/invoices?limit=200";
       const r = await fetch(url);
       const d = await r.json();
       setInvoices(d.invoices ?? []);
@@ -710,7 +952,7 @@ export default function Invoices({
   };
 
   const handleDispatched = () => {
-    showToast("✓ Dispatched! Stock updated in Google Sheets.");
+    showToast("Stock updated.");
     setSelected(null);
     load(tab === "pending" ? "pending_dispatch" : undefined);
     onStockChanged?.();
@@ -722,7 +964,47 @@ export default function Invoices({
     load(tab === "pending" ? "pending_dispatch" : undefined);
   };
 
-  const listWidth = selected ? 300 : "100%";
+  const handleDeleted = () => {
+    showToast("Moved to bin - recoverable for 30 days.");
+    setSelected(null);
+    load(tab === "pending" ? "pending_dispatch" : undefined);
+  };
+
+  // ── Filter + sort pipeline ─────────────────────────────────────────────────
+  const displayedInvoices = useMemo(() => {
+    let rows = invoices;
+
+    if (search.trim()) {
+      rows = rows.filter((inv) => matchesSearch(inv, search.trim()));
+    }
+
+    const sorted = [...rows].sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case "date":
+          cmp =
+            new Date(a.invoice_date).getTime() -
+            new Date(b.invoice_date).getTime();
+          break;
+        case "customer":
+          cmp = getCustomerName(a).localeCompare(getCustomerName(b));
+          break;
+        case "total":
+          cmp = a.total - b.total;
+          break;
+        case "invoiceNo":
+          cmp = a.invoice_number.localeCompare(b.invoice_number);
+          break;
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+
+    return sorted;
+  }, [invoices, search, sortKey, sortDir]);
+
+  const toggleSortDir = () => setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+
+  const listWidth = selected ? 320 : "100%";
 
   return (
     <div
@@ -734,9 +1016,28 @@ export default function Invoices({
         .inv-item.active { background: rgba(59,130,246,0.08); border-left: 2px solid var(--accent); }
         .inv-tab { font-size: 12px; padding: 8px 14px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--text-muted); transition: all 0.1s; margin-bottom: -1px; }
         .inv-tab.on { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
+        .inv-search-input { font-size: 12px !important; padding: 7px 10px !important; }
+        .inv-sort-btn {
+          display: flex; align-items: center; gap: 5px; font-size: 11px;
+          padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border);
+          background: var(--bg-input); color: var(--text-dim); cursor: pointer;
+          white-space: nowrap; position: relative;
+        }
+        .inv-sort-btn:hover { border-color: var(--accent); }
+        .inv-sort-menu {
+          position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
+          background: var(--bg-input); border: 1px solid var(--border);
+          border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+          min-width: 160px; overflow: hidden;
+        }
+        .inv-sort-option {
+          padding: 8px 12px; font-size: 12px; cursor: pointer;
+          display: flex; align-items: center; justify-content: space-between;
+        }
+        .inv-sort-option:hover { background: rgba(59,130,246,0.1); }
+        .inv-sort-option.active { color: var(--accent); font-weight: 500; }
       `}</style>
 
-      {/* Toast */}
       {toast && (
         <div
           style={{
@@ -758,11 +1059,11 @@ export default function Invoices({
         </div>
       )}
 
-      {/* Left — Invoice list */}
+      {/* Left - Invoice list */}
       <div
         style={{
           width: listWidth,
-          minWidth: selected ? 300 : undefined,
+          minWidth: selected ? 320 : undefined,
           flexShrink: 0,
           borderRight: selected ? "1px solid var(--border)" : "none",
           display: "flex",
@@ -807,9 +1108,81 @@ export default function Invoices({
               load(tab === "pending" ? "pending_dispatch" : undefined)
             }
           >
-            ↻
+            Refresh
           </button>
         </div>
+
+        {/* Search + Sort bar */}
+        <div
+          style={{
+            padding: "8px 10px",
+            borderBottom: "1px solid var(--border)",
+            flexShrink: 0,
+            display: "flex",
+            gap: 6,
+          }}
+        >
+          <input
+            className="inv-search-input"
+            placeholder="Search customer, invoice #, product, HSN, serial…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            style={{ flex: 1 }}
+          />
+          <div style={{ position: "relative" }}>
+            <button
+              className="inv-sort-btn"
+              onClick={() => setSortMenuOpen((v) => !v)}
+            >
+              <span>↕ {SORT_LABELS[sortKey]}</span>
+            </button>
+            {sortMenuOpen && (
+              <>
+                <div
+                  onClick={() => setSortMenuOpen(false)}
+                  style={{ position: "fixed", inset: 0, zIndex: 50 }}
+                />
+                <div className="inv-sort-menu">
+                  {(Object.keys(SORT_LABELS) as SortKey[]).map((key) => (
+                    <div
+                      key={key}
+                      className={`inv-sort-option${sortKey === key ? " active" : ""}`}
+                      onClick={() => {
+                        setSortKey(key);
+                        setSortMenuOpen(false);
+                      }}
+                    >
+                      {SORT_LABELS[key]}
+                      {sortKey === key && <span>✓</span>}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+          <button
+            className="inv-sort-btn"
+            onClick={toggleSortDir}
+            title={sortDir === "asc" ? "Ascending" : "Descending"}
+          >
+            {sortDir === "asc" ? "↑" : "↓"}
+          </button>
+        </div>
+
+        {/* Result count when filtered */}
+        {search.trim() && (
+          <div
+            style={{
+              padding: "6px 10px",
+              fontSize: 10,
+              color: "var(--text-muted)",
+              borderBottom: "1px solid var(--border)",
+              flexShrink: 0,
+            }}
+          >
+            {displayedInvoices.length} of {invoices.length} match "{search}"
+          </div>
+        )}
 
         {/* List */}
         <div style={{ flex: 1, overflowY: "auto" }}>
@@ -822,9 +1195,9 @@ export default function Invoices({
                 textAlign: "center",
               }}
             >
-              Loading…
+              Loading...
             </div>
-          ) : invoices.length === 0 ? (
+          ) : displayedInvoices.length === 0 ? (
             <div
               style={{
                 padding: 24,
@@ -833,20 +1206,19 @@ export default function Invoices({
                 textAlign: "center",
               }}
             >
-              {tab === "pending"
-                ? "No invoices pending dispatch."
-                : "No invoices found."}
+              {search.trim()
+                ? "No invoices match your search."
+                : tab === "pending"
+                  ? "No invoices pending dispatch."
+                  : "No invoices found."}
             </div>
           ) : (
-            invoices.map((inv) => {
+            displayedInvoices.map((inv) => {
               const sm =
                 STATUS_META[inv.status] ?? STATUS_META.pending_dispatch;
-              const customerName =
-                inv.customer_snapshot?.display_name ||
-                inv.customer_snapshot?.name ||
-                "—";
+              const customerName = getCustomerName(inv) || "-";
               const products = inv.line_items
-                .map((l) => `${l.qty}× ${l.model}`)
+                .map((l) => `${l.qty}x ${l.model}`)
                 .join(", ");
               return (
                 <div
@@ -854,7 +1226,6 @@ export default function Invoices({
                   className={`inv-item${selected?.id === inv.id ? " active" : ""}`}
                   onClick={() => setSelected(inv)}
                 >
-                  {/* Company name — most important */}
                   <div
                     style={{
                       fontWeight: 600,
@@ -868,7 +1239,6 @@ export default function Invoices({
                   >
                     {customerName}
                   </div>
-                  {/* Product list */}
                   <div
                     style={{
                       fontSize: 11,
@@ -881,7 +1251,6 @@ export default function Invoices({
                   >
                     {products}
                   </div>
-                  {/* Bottom row: invoice # + date + total + status */}
                   <div
                     style={{
                       display: "flex",
@@ -894,7 +1263,7 @@ export default function Invoices({
                       {inv.invoice_number}
                     </span>
                     <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                      ·
+                      .
                     </span>
                     <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
                       {fmtDate(inv.invoice_date)}
@@ -930,7 +1299,6 @@ export default function Invoices({
           )}
         </div>
 
-        {/* Footer */}
         <div
           style={{
             padding: "6px 12px",
@@ -940,13 +1308,14 @@ export default function Invoices({
             flexShrink: 0,
           }}
         >
-          {invoices.length} invoice{invoices.length !== 1 ? "s" : ""}
-          {invoices.length > 0 &&
-            ` · ${fmtShort(invoices.reduce((s, i) => s + i.total, 0))} total`}
+          {displayedInvoices.length} invoice
+          {displayedInvoices.length !== 1 ? "s" : ""}
+          {displayedInvoices.length > 0 &&
+            ` - ${fmtShort(displayedInvoices.reduce((s, i) => s + i.total, 0))} total`}
         </div>
       </div>
 
-      {/* Right — Detail panel */}
+      {/* Right - Detail panel */}
       {selected && (
         <div
           style={{
@@ -960,13 +1329,13 @@ export default function Invoices({
             invoice={selected}
             onDispatched={handleDispatched}
             onCancelled={handleCancelled}
+            onDeleted={handleDeleted}
             onClose={() => setSelected(null)}
           />
         </div>
       )}
 
-      {/* Empty state */}
-      {!selected && !loading && invoices.length > 0 && (
+      {!selected && !loading && displayedInvoices.length > 0 && (
         <div
           style={{
             flex: 1,

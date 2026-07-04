@@ -14,32 +14,69 @@ import Customers from "@/components/Customers";
 import Invoices from "@/components/Invoices";
 import PriceFinder from "@/components/PriceFinder";
 import PendingInvoices from "@/components/PendingInvoices";
-
+import ComingSoon from "@/components/ComingSoon";
+import Bin from "@/components/Bin";
 export type Screen =
+  // existing
   | "dashboard"
   | "stock"
   | "sale"
   | "invoices"
   | "purchase"
   | "transfer"
+  | "transfers"
   | "additem"
-  | "transactions"
+  | "ledger"
   | "quotation"
   | "downloads"
-  | "customers";
+  | "customers"
+  // new CRM
+  | "vendors"
+  | "projects"
+  // new Sales
+  | "proforma"
+  | "credit_note"
+  | "challan"
+  | "packing_list"
+  | "eway_bill"
+  // new Inventory
+  | "debit_note"
+  // new Expenses
+  | "expenses"
+  | "proj_expenses"
+  // new People / Admin
+  | "employees"
+  | "bin"
+  | "audit_log"
+  | "settings";
 
 const TITLES: Record<Screen, string> = {
   dashboard: "Dashboard",
-  stock: "Stock View",
+  stock: "Stock",
   sale: "Record Sale",
-  invoices: "Invoices",
-  purchase: "Record Purchase",
+  invoices: "Invoice",
+  purchase: "Purchase Orders",
   transfer: "Stock Transfer",
+  transfers: "Stock Transfer",
   additem: "Add New Item",
-  transactions: "Ledger",
+  ledger: "Ledger",
   quotation: "Quotation",
   downloads: "Downloads & Reports",
   customers: "Customers",
+  vendors: "Vendors",
+  projects: "Projects",
+  proforma: "Proforma Invoice",
+  credit_note: "Credit Note",
+  challan: "Delivery Challan",
+  packing_list: "Packing List",
+  eway_bill: "E-Way Bill",
+  debit_note: "Debit Note",
+  expenses: "Company Expenses",
+  proj_expenses: "Project Expenses",
+  employees: "Employees",
+  bin: "Bin",
+  audit_log: "Audit Log",
+  settings: "Settings",
 };
 
 export default function Home() {
@@ -214,7 +251,7 @@ export default function Home() {
                 color: "var(--accent-green)",
               }}
             >
-              ● Live · Google Sheets
+              ● Live · TMCI Desk
             </span>
           </div>
         </div>
@@ -224,6 +261,7 @@ export default function Home() {
           className="app-main-body"
           style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}
         >
+          {/* ── Existing screens (unchanged) ── */}
           {screen === "dashboard" && (
             <>
               <PendingInvoices onStockChanged={refresh} />
@@ -254,7 +292,7 @@ export default function Home() {
               }}
             />
           )}
-          {screen === "transfer" && (
+          {(screen === "transfer" || screen === "transfers") && (
             <StockTransfer
               products={products}
               onSuccess={() => {
@@ -271,7 +309,7 @@ export default function Home() {
               }}
             />
           )}
-          {screen === "transactions" && (
+          {screen === "ledger" && (
             <Ledger sales={sales} purchases={purchases} />
           )}
           {screen === "quotation" && <Quotation products={products} />}
@@ -283,6 +321,186 @@ export default function Home() {
             />
           )}
           {screen === "customers" && <Customers />}
+
+          {/* ── New CRM screens ── */}
+          {screen === "vendors" && (
+            <ComingSoon
+              title="Vendors"
+              icon="🏭"
+              description="Manage your supplier and vendor database — contact details, payment terms, GSTIN, and purchase history."
+              bullets={[
+                "Vendor profile with GSTIN, bank details, payment terms",
+                "Link vendors to Purchase Orders and lots",
+                "Purchase history per vendor",
+                "Outstanding payables tracker",
+              ]}
+            />
+          )}
+          {screen === "projects" && (
+            <ComingSoon
+              title="Projects"
+              icon="📁"
+              description="Track opportunities, pre-projects, and active projects from lead to closure."
+              bullets={[
+                "Opportunities — initial enquiries and leads",
+                "Pre-Projects — quoted, awaiting PO",
+                "Projects — active, with milestones and billing",
+                "Link invoices, expenses, and customers to projects",
+              ]}
+            />
+          )}
+
+          {/* ── New Sales screens ── */}
+          {screen === "proforma" && (
+            <ComingSoon
+              title="Proforma Invoice"
+              icon="📋"
+              description="Generate proforma invoices for customers before raising the final tax invoice."
+              bullets={[
+                "Same line-item builder as Quotation",
+                "Auto-number with PI prefix",
+                "Convert to Invoice with one click",
+                "PDF export",
+              ]}
+            />
+          )}
+          {screen === "credit_note" && (
+            <ComingSoon
+              title="Credit Note"
+              icon="↩"
+              description="Issue credit notes against dispatched invoices for returns, short-supply, or price corrections."
+              bullets={[
+                "Link to original invoice",
+                "Partial or full credit",
+                "Restore stock on return",
+                "GST-compliant credit note format",
+              ]}
+            />
+          )}
+          {screen === "challan" && (
+            <ComingSoon
+              title="Delivery Challan"
+              icon="🚚"
+              description="Generate delivery challans for goods dispatched without a tax invoice (e.g. demos, approvals)."
+              bullets={[
+                "Auto-fill from Invoice or Proforma",
+                "Serial number capture",
+                "Driver and vehicle details",
+                "Convert to Invoice on confirmation",
+              ]}
+            />
+          )}
+          {screen === "packing_list" && (
+            <ComingSoon
+              title="Packing List"
+              icon="📦"
+              description="Generate packing lists for shipments — box-wise breakup of items and quantities."
+              bullets={[
+                "Box-wise item allocation",
+                "Link to Invoice or Challan",
+                "Net and gross weight per box",
+                "Print-ready format",
+              ]}
+            />
+          )}
+          {screen === "eway_bill" && (
+            <ComingSoon
+              title="E-Way Bill"
+              icon="🛣"
+              description="Generate and manage E-Way Bills for GST-compliant movement of goods above ₹50,000."
+              bullets={[
+                "Auto-fill from Invoice",
+                "Transporter and vehicle details",
+                "E-Way Bill number tracking",
+                "Integration with NIC portal (planned)",
+              ]}
+            />
+          )}
+
+          {/* ── New Inventory screens ── */}
+          {screen === "debit_note" && (
+            <ComingSoon
+              title="Debit Note"
+              icon="📝"
+              description="Issue debit notes to vendors for short supply, price differences, or quality rejections."
+              bullets={[
+                "Link to Purchase Order or lot",
+                "Partial debit on under-delivery",
+                "GST-compliant debit note format",
+                "Adjust vendor outstanding balance",
+              ]}
+            />
+          )}
+
+          {/* ── New Expense screens ── */}
+          {screen === "expenses" && (
+            <ComingSoon
+              title="Company Expenses"
+              icon="💸"
+              description="Track all company-level operating expenses — rent, utilities, salaries, subscriptions, and more."
+              bullets={[
+                "Expense categories and tags",
+                "Receipt upload and attachment",
+                "Monthly and annual summaries",
+                "Export to CSV for accounting",
+              ]}
+            />
+          )}
+          {screen === "proj_expenses" && (
+            <ComingSoon
+              title="Project Expenses"
+              icon="🧾"
+              description="Track expenses billed or incurred against specific projects — travel, installation, materials."
+              bullets={[
+                "Link expense to project",
+                "Billable vs non-billable flag",
+                "Project P&L view",
+                "Reimbursement tracking",
+              ]}
+            />
+          )}
+
+          {/* ── People / Admin ── */}
+          {screen === "employees" && (
+            <ComingSoon
+              title="Employees"
+              icon="👤"
+              description="Manage your team — contact details, roles, and access levels."
+              bullets={[
+                "Employee profiles and roles",
+                "Assign to projects and customers",
+                "Access control per screen (planned)",
+                "Attendance and leave tracking (planned)",
+              ]}
+            />
+          )}
+          {screen === "audit_log" && (
+            <ComingSoon
+              title="Audit Log"
+              icon="🔍"
+              description="Full activity log — every invoice created, stock dispatched, lot consumed, and setting changed."
+              bullets={[
+                "Timestamp and user for every action",
+                "Filter by date, screen, or action type",
+                "Immutable — records cannot be edited",
+                "Export for compliance",
+              ]}
+            />
+          )}
+          {screen === "settings" && (
+            <ComingSoon
+              title="Settings"
+              icon="⚙"
+              description="Configure TMCI Desk — company profile, invoice numbering, GST rates, and integrations."
+              bullets={[
+                "Company name, address, GSTIN, logo",
+                "Invoice / Quotation number prefixes",
+                "Default GST rate and HSN codes",
+                "Google Sheets and Supabase connection status",
+              ]}
+            />
+          )}
+          {screen === "bin" && <Bin />}
         </div>
       </div>
     </div>

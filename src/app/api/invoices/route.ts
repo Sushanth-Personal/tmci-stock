@@ -21,6 +21,7 @@ export async function GET(req: Request) {
     let query = supabase
       .from("sale_invoices")
       .select("*")
+      .is("deleted_at", null) // never show binned invoices in normal lists
       .order("created_at", { ascending: false })
       .limit(limit);
 
@@ -36,7 +37,7 @@ export async function GET(req: Request) {
   }
 }
 
-// POST /api/invoices  — create invoice (does NOT touch stock)
+// POST /api/invoices — create invoice (does NOT touch stock)
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -48,7 +49,7 @@ export async function POST(req: Request) {
       customer_snapshot,
       location,
       line_items,
-      charges, // ← Array<{ label: string; amount: number }>
+      charges,
       subtotal,
       gst_rate,
       gst_amount,
@@ -77,7 +78,7 @@ export async function POST(req: Request) {
         customer_snapshot: customer_snapshot || null,
         location,
         line_items,
-        charges: charges ?? [], // ← persisted to JSONB column
+        charges: charges ?? [],
         subtotal,
         gst_rate,
         gst_amount,

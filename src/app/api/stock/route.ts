@@ -1,7 +1,8 @@
 // src/app/api/stock/route.ts
 // Reads from lots table — single source of truth
-// Returns one row per model (not per location)
-// kochiStock + bangaloreStock as separate fields to match StockView columns
+// Returns one row per model (kochiStock + bangaloreStock as separate fields)
+// FIX: model matching is now trimmed + lowercased on BOTH sides to avoid
+// silent join misses from stray whitespace in either table.
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -12,6 +13,14 @@ function getSupabase() {
   if (!url || !key)
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
   return createClient(url, key);
+}
+
+// Normalise for matching: trim + collapse internal whitespace + lowercase
+function normModel(s: unknown): string {
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
 }
 
 export async function GET() {
@@ -33,11 +42,11 @@ export async function GET() {
     const lots = lotsRes.data ?? [];
     const products = productsRes.data ?? [];
 
+    // Product lookup — normalised key
     const productByModel = new Map(
-      products.map((p: any) => [String(p.model ?? "").toLowerCase(), p]),
+      products.map((p: any) => [normModel(p.model), p]),
     );
 
-    // Group by model — one entry per model with kochi+bangalore broken out
     const grouped = new Map<
       string,
       {
@@ -52,7 +61,7 @@ export async function GET() {
     >();
 
     for (const l of lots) {
-      const key = String(l.model).toLowerCase();
+      const key = normModel(l.model);
       const loc = String(l.location ?? "").toLowerCase();
       const purchased = Number(l.qty_purchased ?? 0);
       const remaining = Number(l.remaining_qty ?? 0);
@@ -60,7 +69,7 @@ export async function GET() {
 
       if (!grouped.has(key)) {
         grouped.set(key, {
-          model: l.model,
+          model: String(l.model ?? "").trim(), // keep original display casing
           kochiQty: 0,
           kochiValue: 0,
           bloreQty: 0,
@@ -82,10 +91,10 @@ export async function GET() {
       }
     }
 
-    const stock = Array.from(grouped.values())
-      .filter((g) => g.totalReceived > 0)
-      .map((g) => {
-        const prod = productByModel.get(g.model.toLowerCase());
+    const stock = Array.from(grouped.entries())
+      .filter(([, g]) => g.totalReceived > 0)
+      .map(([key, g]) => {
+        const prod = productByModel.get(key);
         const totalQty = g.kochiQty + g.bloreQty;
         const totalVal = g.kochiValue + g.bloreValue;
         const costPrice =
@@ -96,7 +105,6 @@ export async function GET() {
               : 0;
 
         return {
-          // Fields StockView expects
           itemCode: prod?.item_code ?? "",
           make: prod?.make ?? "",
           model: g.model,
@@ -105,14 +113,16 @@ export async function GET() {
           openingStock: 0,
           received: g.totalReceived,
           sold: g.totalSold,
-          currentStock: totalQty, // total across both locations
-          kochiStock: g.kochiQty, // for Kochi column
-          bangaloreStock: g.bloreQty, // for Blore column
+          currentStock: totalQty,
+          kochiStock: g.kochiQty,
+          bangaloreStock: g.bloreQty,
           listPrice: prod?.list_price ?? 0,
           costPrice,
           stockValue: totalVal,
-          // Keep location field for compatibility
           location: "All",
+          // Debug flag — true if no product match was found at all.
+          // Safe to ignore in UI, but useful in browser devtools if this happens again.
+          _unmatched: !prod,
         };
       });
 
