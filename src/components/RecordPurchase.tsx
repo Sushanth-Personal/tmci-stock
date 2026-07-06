@@ -1,6 +1,10 @@
 "use client";
 import { useState, useMemo, useRef, useEffect } from "react";
 import InvoiceScanner from "@/components/InvoiceScanner";
+import PurchaseImport, {
+  ImportedPurchaseBill,
+} from "@/components/PurchaseImport";
+import SerialScanner from "@/components/SerialScanner";
 
 interface Props {
   products: any[];
@@ -218,6 +222,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const [invoiceDate, setInvoiceDate] = useState("");
   const [location, setLocation] = useState("Kochi");
   const [qty, setQty] = useState<number | "">("");
+  const [serialNumbers, setSerialNumbers] = useState<string[]>([]);
   const [listPrice, setListPrice] = useState<number | "">("");
   const [baseDiscount, setBaseDiscount] = useState<number | "">(30);
   const [addDiscount, setAddDiscount] = useState<number | "">(0);
@@ -230,8 +235,22 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  // ── Scanner state (lives here in RecordPurchase, NOT in ModelCombobox) ──────
+  // ── Scanner (Gemini/Claude AI scan) ──────────────────────────────────────
   const [showScanner, setShowScanner] = useState(false);
+
+  // ── Bulk import (Claude JSON / Excel — zero cost) ────────────────────────
+  const [showImport, setShowImport] = useState(false);
+  const [scanTargetIdx, setScanTargetIdx] = useState<number | null>(null);
+  const [pendingQueue, setPendingQueue] = useState<
+    Array<{
+      model: string;
+      qty: number;
+      unitPrice: number;
+      discount: number;
+      serialNumbers?: string;
+    }>
+  >([]);
+  const [importNote, setImportNote] = useState("");
 
   const modelInputRef = useRef<HTMLInputElement>(null);
 
@@ -239,6 +258,28 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
     () => products.find((p) => p.model === model),
     [products, model],
   );
+
+  // Keep serialNumbers array length in sync with qty
+  const handleQtyChange = (newQty: number | "") => {
+    setQty(newQty);
+    const safeQty = newQty === "" ? 0 : Math.max(0, newQty);
+    setSerialNumbers((prev) => {
+      if (safeQty === prev.length) return prev;
+      if (safeQty < prev.length) return prev.slice(0, safeQty);
+      return [
+        ...prev,
+        ...Array.from({ length: safeQty - prev.length }, () => ""),
+      ];
+    });
+  };
+
+  const handleSerialChange = (idx: number, value: string) => {
+    setSerialNumbers((prev) => {
+      const next = [...prev];
+      next[idx] = value;
+      return next;
+    });
+  };
 
   // ── Handler called when AI scan completes ──────────────────────────────────
   const handleScanned = (data: any) => {
@@ -249,12 +290,88 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
     const first = data.lineItems[0];
     if (first) {
       setModel(first.model ?? "");
-      setQty(first.qty ?? "");
+      handleQtyChange(first.qty ?? "");
       setCustomFinal(first.unitPrice ?? "");
       setBaseDiscount(first.discount ?? 0);
       setAddDiscount(0);
+      if (first.serialNumbers) {
+        const sns = String(first.serialNumbers)
+          .split(",")
+          .map((s: string) => s.trim())
+          .filter(Boolean);
+        const qtyNum = Number(first.qty) || sns.length;
+        setSerialNumbers(
+          Array.from({ length: qtyNum }, (_, i) => sns[i] ?? ""),
+        );
+      }
     }
     setShowScanner(false);
+  };
+
+  // ── Handler called when bulk import completes ───────────────────────────
+  // Loads header fields, then queues ALL line items — user steps through
+  // "Load next item" so each still goes through the normal price-breakdown
+  // + save flow (keeps FIFO lot creation consistent with manual entry).
+  const handleImported = (data: ImportedPurchaseBill) => {
+    if (data.vendor) setSupplier(data.vendor);
+    if (data.poNumber) setPoNumber(data.poNumber);
+    else if (data.invoiceNumber) setPoNumber(data.invoiceNumber);
+    if (data.invoiceDate) setDate(data.invoiceDate);
+    if (data.location) setLocation(data.location);
+    if (data.courierCharges) setCourier(data.courierCharges);
+    setBatchMode(true);
+
+    const queue = data.lineItems.map((item) => ({
+      model: item.model,
+      qty: item.qty,
+      unitPrice: item.unitPrice,
+      discount: item.discountPct ?? 0,
+      serialNumbers: item.serialNumbers ?? "",
+    }));
+
+    setPendingQueue(queue);
+    setImportNote(
+      `Imported ${queue.length} item${queue.length !== 1 ? "s" : ""}. ` +
+        `Loaded item 1 of ${queue.length} below — review, adjust if needed, then click "Add item → sheet". ` +
+        `The next item loads automatically.`,
+    );
+
+    // Load the first item into the form immediately
+    if (queue.length > 0) {
+      loadQueueItem(queue[0]);
+    }
+
+    setShowImport(false);
+  };
+
+  const loadQueueItem = (item: {
+    model: string;
+    qty: number;
+    unitPrice: number;
+    discount: number;
+    serialNumbers?: string;
+  }) => {
+    const matched = products.find(
+      (p) => p.model.toLowerCase() === item.model.toLowerCase(),
+    );
+    setModel(matched?.model ?? item.model);
+    handleQtyChange(item.qty);
+    setListPrice(matched?.listPrice ?? item.unitPrice);
+    setCustomFinal(item.unitPrice);
+    setCustomTotalPrice("");
+    setBaseDiscount(0); // unitPrice already reflects final price, so discounts stay at 0
+    setAddDiscount(0);
+    if (item.serialNumbers) {
+      const sns = item.serialNumbers
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      setSerialNumbers(
+        Array.from({ length: item.qty }, (_, i) => sns[i] ?? ""),
+      );
+    } else {
+      setSerialNumbers(Array.from({ length: item.qty }, () => ""));
+    }
   };
 
   const pricing = useMemo(() => {
@@ -298,6 +415,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
     setCustomFinal("");
     setCustomTotalPrice("");
     setError("");
+    setSerialNumbers([]);
   };
 
   const handleModelSelect = (newModel: string) => {
@@ -317,6 +435,18 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
       setError("Select model and enter qty.");
       return;
     }
+
+    // Serials are optional at purchase (many vendor invoices don't list them).
+    // Only block on duplicates among whatever WAS entered.
+    const entered = serialNumbers.map((s) => s.trim()).filter(Boolean);
+    const dupes = entered.filter((s, i) => entered.indexOf(s) !== i);
+    if (dupes.length > 0) {
+      setError(
+        `Duplicate serial number(s) entered: ${[...new Set(dupes)].join(", ")}`,
+      );
+      return;
+    }
+
     setLoading(true);
     setError("");
     try {
@@ -336,6 +466,10 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
           courierCharges: +(courier || 0),
           supplier,
           poOrInvoice: poNumber,
+          serialNumbers:
+            serialNumbers.filter((s) => s.trim()).length > 0
+              ? serialNumbers
+              : undefined,
         }),
       });
       const data = await res.json();
@@ -362,7 +496,24 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
         );
         clearLineFields();
         setTimeout(() => setSuccess(""), 1800);
-        modelInputRef.current?.focus();
+
+        // ── Advance the import queue, if one is active ──
+        if (pendingQueue.length > 1) {
+          const [, ...rest] = pendingQueue;
+          setPendingQueue(rest);
+          loadQueueItem(rest[0]);
+          setImportNote(
+            `Loaded item ${queuePosition(rest, pendingQueue)} of ${importQueueTotal}. ` +
+              `Review and click "Add item → sheet" to continue.`,
+          );
+        } else if (pendingQueue.length === 1) {
+          setPendingQueue([]);
+          setImportNote(
+            `✓ All imported items added to this PO. Click "Done with this PO" when ready.`,
+          );
+        } else {
+          modelInputRef.current?.focus();
+        }
       } else {
         setSuccess(
           `Purchase recorded! Effective cost: ₹${effectiveCost.toFixed(0)}/unit`,
@@ -379,6 +530,25 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
     }
   };
 
+  // Track total queue length across the import session for progress display
+  const [importQueueTotal, setImportQueueTotalState] = useState(0);
+  const setImportQueueTotal = (n: number) => setImportQueueTotalState(n);
+  const queuePosition = (
+    remaining: typeof pendingQueue,
+    prevQueue: typeof pendingQueue,
+  ) => importQueueTotal - remaining.length + 1;
+
+  // Set total whenever a fresh import lands
+  useEffect(() => {
+    if (pendingQueue.length > 0 && importQueueTotal === 0) {
+      setImportQueueTotal(pendingQueue.length);
+    }
+    if (pendingQueue.length === 0) {
+      // reset after a short delay so the "all done" message can still show total correctly
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingQueue]);
+
   const handleNewPO = () => {
     setBatchLines([]);
     setSupplier("");
@@ -386,6 +556,24 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
     setInvoiceDate("");
     clearLineFields();
     setCourier(0);
+    setPendingQueue([]);
+    setImportNote("");
+    setImportQueueTotal(0);
+  };
+
+  const skipQueueItem = () => {
+    if (pendingQueue.length <= 1) {
+      setPendingQueue([]);
+      setImportNote("");
+      return;
+    }
+    const [, ...rest] = pendingQueue;
+    setPendingQueue(rest);
+    loadQueueItem(rest[0]);
+    setImportNote(
+      `Loaded item ${queuePosition(rest, pendingQueue)} of ${importQueueTotal} (skipped previous). ` +
+        `Review and click "Add item → sheet" to continue.`,
+    );
   };
 
   const batchTotal = batchLines.reduce((s, l) => s + l.total, 0);
@@ -393,13 +581,37 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* ── Scanner modal — rendered at RecordPurchase root, NOT inside ModelCombobox ── */}
+      {/* ── Scanner modal ── */}
       {showScanner && (
         <InvoiceScanner
           mode="purchase"
           products={products}
           onExtracted={handleScanned}
           onClose={() => setShowScanner(false)}
+        />
+      )}
+
+      {/* ── Bulk import modal ── */}
+      {showImport && (
+        <PurchaseImport
+          products={products}
+          onImported={handleImported}
+          onClose={() => setShowImport(false)}
+        />
+      )}
+
+      {/* ── Serial scanner modal ── */}
+      {scanTargetIdx !== null && (
+        <SerialScanner
+          onScanned={(serial) => {
+            handleSerialChange(scanTargetIdx, serial);
+            // Auto-advance to the next empty cell, if any
+            const nextEmpty = serialNumbers.findIndex(
+              (s, i) => i > scanTargetIdx && !s.trim(),
+            );
+            setScanTargetIdx(nextEmpty !== -1 ? nextEmpty : null);
+          }}
+          onClose={() => setScanTargetIdx(null)}
         />
       )}
 
@@ -512,6 +724,48 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
         )}
       </div>
 
+      {/* Import progress banner */}
+      {importNote && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "10px 14px",
+            borderRadius: 8,
+            background: "rgba(59,130,246,0.08)",
+            border: "1px solid rgba(59,130,246,0.3)",
+            fontSize: 12,
+            color: "var(--accent)",
+          }}
+        >
+          <span>💡 {importNote}</span>
+          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {pendingQueue.length > 1 && (
+              <button
+                className="btn-ghost"
+                style={{ fontSize: 10, padding: "3px 8px" }}
+                onClick={skipQueueItem}
+              >
+                Skip this item →
+              </button>
+            )}
+            <button
+              onClick={() => setImportNote("")}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+              }}
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
       <div
         style={{
           background: "var(--bg-card)",
@@ -520,13 +774,15 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
           padding: "12px 14px",
         }}
       >
-        {/* Header row with title + scan button */}
+        {/* Header row with title + scan/import buttons */}
         <div
           style={{
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             marginBottom: 10,
+            flexWrap: "wrap",
+            gap: 8,
           }}
         >
           <div
@@ -540,19 +796,34 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
           >
             {batchMode ? "Add line item to PO" : "Purchase details"}
           </div>
-          <button
-            className="btn-ghost"
-            style={{
-              fontSize: 11,
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-            }}
-            onClick={() => setShowScanner(true)}
-            type="button"
-          >
-            🤖 Scan Invoice
-          </button>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              className="btn-ghost"
+              style={{
+                fontSize: 11,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+              onClick={() => setShowImport(true)}
+              type="button"
+            >
+              📥 Import Bill (Claude JSON / Excel)
+            </button>
+            <button
+              className="btn-ghost"
+              style={{
+                fontSize: 11,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+              onClick={() => setShowScanner(true)}
+              type="button"
+            >
+              🤖 Scan Invoice
+            </button>
+          </div>
         </div>
 
         <div
@@ -589,7 +860,7 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               <option>Bangalore</option>
             </select>
           </FG>
-          <FG label="Qty purchased">
+          <FG label="Qty purchased" full>
             <input
               type="text"
               inputMode="numeric"
@@ -598,9 +869,95 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               placeholder="e.g. 10"
               onChange={(e) => {
                 const digits = e.target.value.replace(/[^0-9]/g, "");
-                setQty(digits === "" ? "" : parseInt(digits, 10));
+                handleQtyChange(digits === "" ? "" : parseInt(digits, 10));
               }}
             />
+            {qty !== "" && +qty > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginBottom: 6,
+                  }}
+                >
+                  <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                    Serial numbers — {qty} unit{+qty === 1 ? "" : "s"}
+                    <span style={{ marginLeft: 6, opacity: 0.7 }}>
+                      (optional — only fill in if the vendor's invoice lists
+                      them)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    style={{ fontSize: 10, padding: "3px 8px" }}
+                    onClick={() => {
+                      const firstEmpty = serialNumbers.findIndex(
+                        (s) => !s.trim(),
+                      );
+                      setScanTargetIdx(firstEmpty !== -1 ? firstEmpty : 0);
+                    }}
+                  >
+                    📷 Scan all
+                  </button>
+                </div>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: `repeat(${Math.min(+qty, 5)}, 1fr)`,
+                    gap: 6,
+                  }}
+                >
+                  {Array.from({ length: +qty }).map((_, si) => (
+                    <div key={si}>
+                      <div
+                        style={{
+                          fontSize: 9,
+                          color: "var(--text-muted)",
+                          marginBottom: 2,
+                        }}
+                      >
+                        Unit {si + 1}
+                      </div>
+                      <div style={{ display: "flex", gap: 3 }}>
+                        <input
+                          value={serialNumbers[si] ?? ""}
+                          placeholder="S/N (if known)"
+                          onChange={(e) =>
+                            handleSerialChange(si, e.target.value)
+                          }
+                          style={{
+                            fontFamily: "monospace",
+                            fontSize: 11,
+                            padding: "5px 8px",
+                            flex: 1,
+                            minWidth: 0,
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setScanTargetIdx(si)}
+                          title="Scan this unit's serial"
+                          style={{
+                            background: "var(--bg-input)",
+                            border: "1px solid var(--border)",
+                            borderRadius: 6,
+                            padding: "0 7px",
+                            cursor: "pointer",
+                            fontSize: 12,
+                            flexShrink: 0,
+                          }}
+                        >
+                          📷
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </FG>
           <FG label="Unit list price (₹)">
             <input

@@ -21,11 +21,15 @@ function getSupabase() {
   return createClient(url, key);
 }
 
+// Normalise for matching: remove ALL whitespace (not just collapse it) + lowercase.
+// This handles "302+" vs "302 +" vs "302  +" vs "59 MINI" vs "59Mini" — anything
+// where the only difference is spacing, since spacing is not semantically part
+// of a model number.
 function normModel(s: unknown): string {
   return String(s ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
+    .replace(/\s+/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 async function getNextTxnId(
@@ -86,7 +90,9 @@ export async function PATCH(
     //    silently missing on case/whitespace differences.
     const { data: allLots, error: lotsErr } = await supabase
       .from("lots")
-      .select("lot_id, model, remaining_qty, unit_purchase_price, date")
+      .select(
+        "lot_id, model, remaining_qty, unit_purchase_price, date, serial_numbers",
+      )
       .eq("location", location)
       .gt("remaining_qty", 0)
       .order("date", { ascending: true })
@@ -124,30 +130,60 @@ export async function PATCH(
       );
     }
 
-    // 4. FIFO-consume each line item from matched lots, log Sale transactions
-    const lotUpdates: Array<{ lot_id: string; remaining_qty: number }> = [];
+    // 4. FIFO-consume each line item from matched lots. Real serial numbers
+    //    are pulled from the lot's stored serial_numbers array — the FIRST
+    //    remaining serials in that lot are taken (oldest stock first),
+    //    replacing whatever was typed on the invoice form (which may have
+    //    been blank or a placeholder from import).
+    const lotUpdates: Array<{
+      lot_id: string;
+      remaining_qty: number;
+      serial_numbers: string[];
+    }> = [];
     const saleTxns: any[] = [];
+    const updatedLineItems: any[] = [];
 
     for (const item of lineItems) {
       const key = normModel(item.model);
       const lots = lotsByModel.get(key) ?? [];
       let remaining = Number(item.qty);
       let costTotal = 0;
+      const consumedSerials: string[] = [];
 
       for (const lot of lots) {
         if (remaining <= 0) break;
+
         const already = lotUpdates.find((u) => u.lot_id === lot.lot_id);
         const currentRemaining = already
           ? already.remaining_qty
           : Number(lot.remaining_qty);
+        const currentSerials: string[] = already
+          ? already.serial_numbers
+          : Array.isArray(lot.serial_numbers)
+            ? [...lot.serial_numbers]
+            : [];
+
         if (currentRemaining <= 0) continue;
 
         const take = Math.min(currentRemaining, remaining);
         const newRemaining = currentRemaining - take;
 
-        if (already) already.remaining_qty = newRemaining;
-        else
-          lotUpdates.push({ lot_id: lot.lot_id, remaining_qty: newRemaining });
+        // Take the FIRST `take` serials from this lot (FIFO within the lot too —
+        // they were stored in purchase order)
+        const takenSerials = currentSerials.slice(0, take);
+        const leftoverSerials = currentSerials.slice(take);
+        consumedSerials.push(...takenSerials);
+
+        if (already) {
+          already.remaining_qty = newRemaining;
+          already.serial_numbers = leftoverSerials;
+        } else {
+          lotUpdates.push({
+            lot_id: lot.lot_id,
+            remaining_qty: newRemaining,
+            serial_numbers: leftoverSerials,
+          });
+        }
 
         costTotal += take * Number(lot.unit_purchase_price ?? 0);
         remaining -= take;
@@ -174,14 +210,24 @@ export async function PATCH(
         po_invoice: invoice.invoice_number,
         status: "Dispatched",
         cost_price: Number(item.qty) > 0 ? costTotal / Number(item.qty) : 0,
+        serial_numbers: consumedSerials,
+      });
+
+      // Replace the invoice line item's serials with the REAL ones taken from stock
+      updatedLineItems.push({
+        ...item,
+        serialNumbers: consumedSerials,
       });
     }
 
-    // 5. Apply all lot updates
+    // 5. Apply all lot updates (remaining_qty AND serial_numbers)
     for (const u of lotUpdates) {
       const { error } = await supabase
         .from("lots")
-        .update({ remaining_qty: u.remaining_qty })
+        .update({
+          remaining_qty: u.remaining_qty,
+          serial_numbers: u.serial_numbers,
+        })
         .eq("lot_id", u.lot_id);
       if (error) throw error;
     }
@@ -192,12 +238,13 @@ export async function PATCH(
       .insert(saleTxns);
     if (txnInsertErr) throw txnInsertErr;
 
-    // 7. Mark invoice dispatched
+    // 7. Mark invoice dispatched AND overwrite line_items with real serials
     const { error: updateInvErr } = await supabase
       .from("sale_invoices")
       .update({
         status: "dispatched",
         dispatched_at: dispatchedAt,
+        line_items: updatedLineItems,
         updated_at: new Date().toISOString(),
       })
       .eq("id", id);
@@ -210,6 +257,10 @@ export async function PATCH(
       dispatchedAt,
       lotsUpdated: lotUpdates.length,
       transactionsCreated: saleTxns.length,
+      serialsAssigned: saleTxns.reduce(
+        (s, t) => s + (t.serial_numbers?.length ?? 0),
+        0,
+      ),
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
