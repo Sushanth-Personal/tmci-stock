@@ -18,6 +18,7 @@ const SCANNER_ELEMENT_ID = "serial-scanner-viewport";
 
 export default function SerialScanner({ onScanned, onClose }: Props) {
   const [mode, setMode] = useState<"barcode" | "photo">("barcode");
+  const [restartKey, setRestartKey] = useState(0);
   const [error, setError] = useState("");
   const [scanning, setScanning] = useState(false);
   const [lastResult, setLastResult] = useState("");
@@ -32,17 +33,41 @@ export default function SerialScanner({ onScanned, onClose }: Props) {
 
     (async () => {
       try {
-        const { Html5Qrcode } = await import("html5-qrcode");
+        const { Html5Qrcode, Html5QrcodeSupportedFormats } =
+          await import("html5-qrcode");
         if (cancelled) return;
 
-        const scanner = new Html5Qrcode(SCANNER_ELEMENT_ID);
+        const scanner = new Html5Qrcode(SCANNER_ELEMENT_ID, {
+          // Explicitly enable 1D linear barcode formats — Fluke serial/item
+          // stickers use CODE_128, with UPC_A/EAN_13 also present on the same
+          // label. Without this, the library defaults to QR-only detection
+          // and camera preview works fine but nothing ever gets recognised.
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.CODE_39,
+            Html5QrcodeSupportedFormats.CODE_93,
+            Html5QrcodeSupportedFormats.CODABAR,
+            Html5QrcodeSupportedFormats.ITF,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.QR_CODE, // keep QR too, just in case
+          ],
+          verbose: false,
+        } as any);
         scannerRef.current = scanner;
 
         await scanner.start(
           { facingMode: "environment" }, // rear camera
           {
-            fps: 10,
-            qrbox: { width: 260, height: 140 }, // wide box — barcodes are usually landscape
+            fps: 15,
+            // Wide + short box matching a 1D barcode's actual shape, rather
+            // than a square QR-style box. Narrower height also helps avoid
+            // accidentally capturing a neighbouring barcode on the same label
+            // (Fluke stickers stack Item No / UPC / S/N barcodes close together).
+            qrbox: { width: 300, height: 90 },
+            aspectRatio: 1.6,
           },
           (decodedText: string) => {
             // Successful scan
@@ -70,7 +95,7 @@ export default function SerialScanner({ onScanned, onClose }: Props) {
         scannerRef.current.clear?.();
       }
     };
-  }, [mode, onScanned]);
+  }, [mode, restartKey, onScanned]);
 
   // ── Photo + AI fallback mode ───────────────────────────────────────────
   const handlePhoto = async (file: File) => {
@@ -255,13 +280,34 @@ export default function SerialScanner({ onScanned, onClose }: Props) {
               <div
                 style={{
                   fontSize: 11,
-                  color: "var(--text-muted)",
+                  color: "var(--accent-amber)",
                   marginTop: 8,
                   textAlign: "center",
+                  lineHeight: 1.5,
                 }}
               >
-                Point the rear camera at the serial number barcode sticker.
+                ⚠ Fluke labels have 3 barcodes stacked together (Item No / UPC /
+                S/N).
+                <br />
+                Point closely at the{" "}
+                <strong>bottom barcode marked "S/N"</strong> only — cover the
+                others with your finger if needed.
               </div>
+              {lastResult && (
+                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  <button
+                    className="btn-ghost"
+                    style={{ fontSize: 10, flex: 1 }}
+                    onClick={() => {
+                      // Wrong barcode was scanned — clear and force scanner to restart
+                      setLastResult("");
+                      setRestartKey((k) => k + 1);
+                    }}
+                  >
+                    ✕ Wrong code — scan again
+                  </button>
+                </div>
+              )}
             </>
           )}
 
