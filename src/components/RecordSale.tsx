@@ -10,7 +10,6 @@
 
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import InvoiceImport, { ImportedInvoice } from "@/components/InvoiceImport";
-import SerialScanner from "@/components/SerialScanner";
 
 interface Props {
   products: any[];
@@ -633,10 +632,6 @@ export default function RecordSale({ products, onSuccess }: Props) {
   // ── Invoice Import (Claude JSON / Excel) ──────────────────────────────────
   const [showImport, setShowImport] = useState(false);
   const [importNote, setImportNote] = useState("");
-  const [scanTarget, setScanTarget] = useState<{
-    lineIdx: number;
-    snIdx: number;
-  } | null>(null);
 
   const handleImported = (data: ImportedInvoice) => {
     // Header fields
@@ -839,26 +834,6 @@ export default function RecordSale({ products, onSuccess }: Props) {
           products={products}
           onImported={handleImported}
           onClose={() => setShowImport(false)}
-        />
-      )}
-
-      {/* ── Serial scanner modal ── */}
-      {scanTarget && (
-        <SerialScanner
-          onScanned={(serial) => {
-            handleSerialChange(scanTarget.lineIdx, scanTarget.snIdx, serial);
-            // Auto-advance to the next empty serial cell in the SAME line item
-            const line = lines[scanTarget.lineIdx];
-            const nextEmpty = line?.serialNumbers.findIndex(
-              (s, i) => i > scanTarget.snIdx && !s.trim(),
-            );
-            setScanTarget(
-              nextEmpty !== undefined && nextEmpty !== -1
-                ? { lineIdx: scanTarget.lineIdx, snIdx: nextEmpty }
-                : null,
-            );
-          }}
-          onClose={() => setScanTarget(null)}
         />
       )}
 
@@ -1144,35 +1119,16 @@ export default function RecordSale({ products, onSuccess }: Props) {
                   <div style={{ marginTop: 10 }}>
                     <div
                       style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
+                        fontSize: 10,
+                        color: "var(--text-muted)",
                         marginBottom: 6,
                       }}
                     >
-                      <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                        Serial numbers — {line.qty} unit
-                        {line.qty !== 1 ? "s" : ""}
-                        <span style={{ marginLeft: 6, opacity: 0.7 }}>
-                          (optional, leave blank if not applicable)
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-ghost"
-                        style={{ fontSize: 10, padding: "3px 8px" }}
-                        onClick={() => {
-                          const firstEmpty = line.serialNumbers.findIndex(
-                            (s) => !s.trim(),
-                          );
-                          setScanTarget({
-                            lineIdx: i,
-                            snIdx: firstEmpty !== -1 ? firstEmpty : 0,
-                          });
-                        }}
-                      >
-                        📷 Scan all
-                      </button>
+                      Serial numbers — {line.qty} unit
+                      {line.qty !== 1 ? "s" : ""}
+                      <span style={{ marginLeft: 6, opacity: 0.7 }}>
+                        (optional, leave blank if not applicable)
+                      </span>
                     </div>
                     <div
                       style={{
@@ -1192,35 +1148,14 @@ export default function RecordSale({ products, onSuccess }: Props) {
                           >
                             Unit {si + 1}
                           </div>
-                          <div style={{ display: "flex", gap: 3 }}>
-                            <input
-                              className="rs-snfield"
-                              value={line.serialNumbers[si] ?? ""}
-                              placeholder="S/N"
-                              onChange={(e) =>
-                                handleSerialChange(i, si, e.target.value)
-                              }
-                              style={{ flex: 1, minWidth: 0 }}
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setScanTarget({ lineIdx: i, snIdx: si })
-                              }
-                              title="Scan this unit's serial"
-                              style={{
-                                background: "var(--bg-input)",
-                                border: "1px solid var(--border)",
-                                borderRadius: 6,
-                                padding: "0 6px",
-                                cursor: "pointer",
-                                fontSize: 11,
-                                flexShrink: 0,
-                              }}
-                            >
-                              📷
-                            </button>
-                          </div>
+                          <input
+                            className="rs-snfield"
+                            value={line.serialNumbers[si] ?? ""}
+                            placeholder="S/N"
+                            onChange={(e) =>
+                              handleSerialChange(i, si, e.target.value)
+                            }
+                          />
                         </div>
                       ))}
                     </div>

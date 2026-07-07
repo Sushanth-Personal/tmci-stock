@@ -4,7 +4,6 @@ import InvoiceScanner from "@/components/InvoiceScanner";
 import PurchaseImport, {
   ImportedPurchaseBill,
 } from "@/components/PurchaseImport";
-import SerialScanner from "@/components/SerialScanner";
 
 interface Props {
   products: any[];
@@ -240,7 +239,6 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
 
   // ── Bulk import (Claude JSON / Excel — zero cost) ────────────────────────
   const [showImport, setShowImport] = useState(false);
-  const [scanTargetIdx, setScanTargetIdx] = useState<number | null>(null);
   const [pendingQueue, setPendingQueue] = useState<
     Array<{
       model: string;
@@ -600,21 +598,6 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
         />
       )}
 
-      {/* ── Serial scanner modal ── */}
-      {scanTargetIdx !== null && (
-        <SerialScanner
-          onScanned={(serial) => {
-            handleSerialChange(scanTargetIdx, serial);
-            // Auto-advance to the next empty cell, if any
-            const nextEmpty = serialNumbers.findIndex(
-              (s, i) => i > scanTargetIdx && !s.trim(),
-            );
-            setScanTargetIdx(nextEmpty !== -1 ? nextEmpty : null);
-          }}
-          onClose={() => setScanTargetIdx(null)}
-        />
-      )}
-
       {/* Batch mode toggle */}
       <div
         style={{
@@ -876,32 +859,15 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
               <div style={{ marginTop: 8 }}>
                 <div
                   style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
+                    fontSize: 10,
+                    color: "var(--text-muted)",
                     marginBottom: 6,
                   }}
                 >
-                  <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                    Serial numbers — {qty} unit{+qty === 1 ? "" : "s"}
-                    <span style={{ marginLeft: 6, opacity: 0.7 }}>
-                      (optional — only fill in if the vendor's invoice lists
-                      them)
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn-ghost"
-                    style={{ fontSize: 10, padding: "3px 8px" }}
-                    onClick={() => {
-                      const firstEmpty = serialNumbers.findIndex(
-                        (s) => !s.trim(),
-                      );
-                      setScanTargetIdx(firstEmpty !== -1 ? firstEmpty : 0);
-                    }}
-                  >
-                    📷 Scan all
-                  </button>
+                  Serial numbers — {qty} unit{+qty === 1 ? "" : "s"}
+                  <span style={{ marginLeft: 6, opacity: 0.7 }}>
+                    (optional — only fill in if the vendor's invoice lists them)
+                  </span>
                 </div>
                 <div
                   style={{
@@ -921,38 +887,16 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
                       >
                         Unit {si + 1}
                       </div>
-                      <div style={{ display: "flex", gap: 3 }}>
-                        <input
-                          value={serialNumbers[si] ?? ""}
-                          placeholder="S/N (if known)"
-                          onChange={(e) =>
-                            handleSerialChange(si, e.target.value)
-                          }
-                          style={{
-                            fontFamily: "monospace",
-                            fontSize: 11,
-                            padding: "5px 8px",
-                            flex: 1,
-                            minWidth: 0,
-                          }}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setScanTargetIdx(si)}
-                          title="Scan this unit's serial"
-                          style={{
-                            background: "var(--bg-input)",
-                            border: "1px solid var(--border)",
-                            borderRadius: 6,
-                            padding: "0 7px",
-                            cursor: "pointer",
-                            fontSize: 12,
-                            flexShrink: 0,
-                          }}
-                        >
-                          📷
-                        </button>
-                      </div>
+                      <input
+                        value={serialNumbers[si] ?? ""}
+                        placeholder="S/N (if known)"
+                        onChange={(e) => handleSerialChange(si, e.target.value)}
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: 11,
+                          padding: "5px 8px",
+                        }}
+                      />
                     </div>
                   ))}
                 </div>
