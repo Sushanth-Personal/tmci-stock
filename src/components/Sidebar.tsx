@@ -6,7 +6,7 @@ interface NavItem {
   id: Screen;
   label: string;
   icon: string;
-  badge?: string; // optional pill label e.g. "NEW"
+  badge?: string;
 }
 
 interface NavSection {
@@ -40,7 +40,6 @@ const NAV: NavSection[] = [
     items: [
       { id: "quotation", label: "Quotation", icon: "📄" },
       { id: "proforma", label: "Proforma Invoice", icon: "📋" },
-      // ── This is where stock goes OUT ──
       {
         id: "sale",
         label: "New Sale / Dispatch",
@@ -59,7 +58,6 @@ const NAV: NavSection[] = [
     label: "Inventory",
     icon: "📦",
     items: [
-      // ── This is where stock comes IN ──
       { id: "purchase", label: "New Purchase", icon: "⬇", badge: "STOCK IN" },
       { id: "stock", label: "View Stock", icon: "≡" },
       { id: "transfers", label: "Stock Transfer", icon: "⇄" },
@@ -86,8 +84,8 @@ const NAV: NavSection[] = [
     label: "Admin",
     icon: "⚙",
     items: [
+      { id: "stock_serials", label: "Stock & Serials", icon: "🔢" },
       { id: "audit_log", label: "Audit Log", icon: "🔍" },
-      { id: "bin", label: "Bin", icon: "🗑" },
       { id: "ledger", label: "Ledger", icon: "📒" },
       { id: "downloads", label: "Downloads", icon: "↧" },
       { id: "settings", label: "Settings", icon: "⚙" },
@@ -138,7 +136,6 @@ export default function Sidebar({
         overflow: "hidden",
       }}
     >
-      {/* Brand */}
       <div
         style={{
           padding: "14px 14px 12px",
@@ -161,7 +158,6 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* Nav */}
       <div style={{ flex: 1, overflowY: "auto", padding: "6px 0 12px" }}>
         {NAV.map((section) => {
           const isOpen = open.has(section.key);
@@ -169,7 +165,6 @@ export default function Sidebar({
 
           return (
             <div key={section.key}>
-              {/* Section header */}
               <div
                 onClick={() => toggle(section.key)}
                 style={{
@@ -209,7 +204,6 @@ export default function Sidebar({
                 </span>
               </div>
 
-              {/* Items */}
               {isOpen && (
                 <div style={{ paddingBottom: 2 }}>
                   {section.items.map((item) => {
@@ -270,7 +264,6 @@ export default function Sidebar({
                         >
                           {item.label}
                         </span>
-                        {/* STOCK IN / STOCK OUT badge */}
                         {item.badge && (
                           <span
                             style={{

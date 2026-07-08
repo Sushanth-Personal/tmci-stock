@@ -16,6 +16,7 @@ import PriceFinder from "@/components/PriceFinder";
 import PendingInvoices from "@/components/PendingInvoices";
 import ComingSoon from "@/components/ComingSoon";
 import Bin from "@/components/Bin";
+import StockSerials from "@/components/StockSerials";
 export type Screen =
   // existing
   | "dashboard"
@@ -47,6 +48,7 @@ export type Screen =
   // new People / Admin
   | "employees"
   | "bin"
+  | "stock_serials"
   | "audit_log"
   | "settings";
 
@@ -75,6 +77,7 @@ const TITLES: Record<Screen, string> = {
   proj_expenses: "Project Expenses",
   employees: "Employees",
   bin: "Bin",
+  stock_serials: "Stock & Serials",
   audit_log: "Audit Log",
   settings: "Settings",
 };
@@ -474,6 +477,7 @@ export default function Home() {
               ]}
             />
           )}
+          {screen === "stock_serials" && <StockSerials />}
           {screen === "audit_log" && (
             <ComingSoon
               title="Audit Log"
