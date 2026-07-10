@@ -1,27 +1,14 @@
 // src/app/api/purchases/route.ts
-// GET reads from Supabase — includes Purchase + Transfer In for Ledger
-// POST — Supabase FIRST (source of truth), Sheets SECOND (best-effort backup)
 //
-// FIX: previously wrote to Sheets first, then Supabase. If the Sheets call
-// threw (quota/timeout/auth), the whole request failed BEFORE ever reaching
-// Supabase — meaning a purchase could show an error yet the person might not
-// notice, and the entry would be completely missing from the database.
-// Now Supabase is written first and is the only thing that must succeed;
-// Sheets sync is wrapped in try/catch and failures there are non-fatal.
+// Fully on Supabase now — the Google Sheets best-effort backup block (STEP 2
+// in the previous version) has been removed per your decision to stop using
+// Google Sheets app-wide. Supabase was already the source of truth here;
+// this just removes the now-pointless secondary write.
 //
-// NEW: serial_numbers (JSONB array) — one string per unit purchased.
+// serial_numbers (JSONB array) — one string per unit purchased, optional.
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
-import {
-  fetchProducts,
-  getNextTxnId,
-  createLot,
-  syncStockRow,
-  fetchStock,
-  appendRows,
-  SHEETS,
-} from "@/lib/sheets";
 
 function getSupabase() {
   const url = process.env.SUPABASE_URL;
@@ -31,7 +18,7 @@ function getSupabase() {
   return createClient(url, key);
 }
 
-async function getNextSupabaseLotId(
+async function getNextLotId(
   supabase: ReturnType<typeof getSupabase>,
 ): Promise<string> {
   const { data } = await supabase
@@ -45,7 +32,7 @@ async function getNextSupabaseLotId(
   return `LOT-${String(num + 1).padStart(4, "0")}`;
 }
 
-async function getNextSupabaseTxnId(
+async function getNextTxnId(
   supabase: ReturnType<typeof getSupabase>,
 ): Promise<string> {
   const { data } = await supabase
@@ -99,7 +86,6 @@ export async function POST(req: Request) {
     const body = await req.json();
     const {
       date,
-      invoiceDate,
       model,
       location,
       qtyPurchased,
@@ -115,7 +101,7 @@ export async function POST(req: Request) {
       vendor,
       poOrInvoice,
       status,
-      serialNumbers, // NEW: string[] — one per unit, may be partially filled or empty
+      serialNumbers, // string[] — one per unit, may be partially filled or empty
     } = body;
 
     const resolvedQty = Number(qtyPurchased ?? qty ?? 0);
@@ -147,8 +133,14 @@ export async function POST(req: Request) {
       );
     }
 
-    const products = await fetchProducts();
-    const product = products.find((p) => p.model === model);
+    const supabase = getSupabase();
+
+    const { data: product, error: productErr } = await supabase
+      .from("products")
+      .select("item_code")
+      .ilike("model", model)
+      .maybeSingle();
+    if (productErr) throw productErr;
     if (!product) {
       return NextResponse.json(
         { error: "Product not found in catalogue" },
@@ -159,20 +151,14 @@ export async function POST(req: Request) {
     const txnDate = date ?? new Date().toISOString().split("T")[0];
     const total = resolvedQty * resolvedUnitPrice + resolvedCourier;
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 1 — SUPABASE FIRST (source of truth). Must succeed or the whole
-    // request fails — nothing "looks" successful unless the data is really
-    // saved where the app actually reads stock from.
-    // ═══════════════════════════════════════════════════════════════════════
-    const supabase = getSupabase();
-    const txnId = await getNextSupabaseTxnId(supabase);
-    const lotId = await getNextSupabaseLotId(supabase);
+    const txnId = await getNextTxnId(supabase);
+    const lotId = await getNextLotId(supabase);
 
     const { error: txnErr } = await supabase.from("transactions").insert({
       txn_id: txnId,
       date: txnDate,
       type: "Purchase",
-      item_code: product.itemCode,
+      item_code: product.item_code ?? "",
       model,
       location,
       qty: resolvedQty,
@@ -219,60 +205,6 @@ export async function POST(req: Request) {
       },
       { onConflict: "model,location" },
     );
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // STEP 2 — GOOGLE SHEETS (best-effort backup only). Wrapped so a failure
-    // here NEVER causes the purchase to be lost — Supabase already has it.
-    // ═══════════════════════════════════════════════════════════════════════
-    try {
-      await appendRows(SHEETS.TRANSACTIONS, "A:N", [
-        [
-          txnId,
-          txnDate,
-          "Purchase",
-          product.itemCode,
-          model,
-          location,
-          resolvedQty,
-          resolvedUnitPrice,
-          total,
-          resolvedVendor,
-          poOrInvoice ?? "",
-          status ?? "Received",
-          "",
-          invoiceDate ?? "",
-        ],
-      ]);
-
-      await createLot({
-        date: txnDate,
-        itemCode: product.itemCode,
-        model,
-        location,
-        qty: resolvedQty,
-        unitPurchasePrice: resolvedUnitPrice,
-        vendor: resolvedVendor,
-        poOrInvoice: poOrInvoice ?? "",
-      });
-
-      const stock = await fetchStock();
-      const existing = stock.find(
-        (s) => s.itemCode === product.itemCode && s.location === location,
-      );
-      const sheetsNewStock = (existing?.currentStock ?? 0) + resolvedQty;
-      await syncStockRow(
-        product.itemCode,
-        model,
-        product.description,
-        location,
-        resolvedQty,
-        0,
-        sheetsNewStock,
-      );
-    } catch (sheetsErr) {
-      // Non-fatal — Supabase already has the authoritative record.
-      console.error("[purchases] Sheets sync failed (non-fatal):", sheetsErr);
-    }
 
     return NextResponse.json({
       success: true,

@@ -1,10 +1,41 @@
 // src/app/api/products/route.ts
+//
+// Fully on Supabase now — the Google Sheets best-effort backup block has
+// been removed per your decision to stop using Google Sheets app-wide.
+
 import { NextResponse } from "next/server";
-import { fetchProducts, appendRows } from "@/lib/sheets";
+import { createClient } from "@supabase/supabase-js";
+
+function getSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key)
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key);
+}
 
 export async function GET() {
   try {
-    const products = await fetchProducts();
+    const supabase = getSupabase();
+    const { data, error } = await supabase
+      .from("products")
+      .select("*")
+      .order("model", { ascending: true });
+
+    if (error) throw error;
+
+    const products = (data ?? []).map((r: any) => ({
+      itemCode: r.item_code ?? "",
+      hsn: r.hsn ?? "",
+      category: r.category ?? "",
+      make: r.make ?? "",
+      model: r.model,
+      description: r.description ?? "",
+      listPrice: Number(r.list_price ?? 0),
+      warranty: r.warranty ?? "",
+      moq: Number(r.moq ?? 1),
+    }));
+
     return NextResponse.json({ products });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -36,26 +67,36 @@ export async function POST(req: Request) {
       );
     }
 
-    const existing = await fetchProducts();
-    if (existing.some((p) => p.itemCode === String(itemCode))) {
+    const supabase = getSupabase();
+
+    // Uniqueness by MODEL — item_code is null for most existing rows, so it
+    // can't reliably detect dupes. Model is the natural key used everywhere
+    // else in the app (dispatch matching, stock grouping, FIFO).
+    const { data: existing, error: existingErr } = await supabase
+      .from("products")
+      .select("id")
+      .ilike("model", model)
+      .maybeSingle();
+    if (existingErr) throw existingErr;
+
+    if (existing) {
       return NextResponse.json(
-        { error: `Item code ${itemCode} already exists in catalogue` },
+        { error: `Model "${model}" already exists in the catalogue` },
         { status: 400 },
       );
     }
 
-    await appendRows("Fluke Products", "A:H", [
-      [
-        String(itemCode),
-        hsn ?? "",
-        category ?? "",
-        model,
-        description ?? "",
-        Number(listPrice),
-        warranty ?? "",
-        Number(moq ?? 1),
-      ],
-    ]);
+    const { error: insertErr } = await supabase.from("products").insert({
+      item_code: String(itemCode),
+      hsn: hsn ?? null,
+      category: category ?? null,
+      model,
+      description: description ?? null,
+      list_price: Number(listPrice),
+      warranty: warranty ? String(warranty) : null,
+      moq: Number(moq ?? 1),
+    });
+    if (insertErr) throw insertErr;
 
     return NextResponse.json({ success: true });
   } catch (err: unknown) {

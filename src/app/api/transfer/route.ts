@@ -1,22 +1,51 @@
 // src/app/api/transfer/route.ts
-import { NextResponse } from "next/server";
-import {
-  fetchProducts,
-  fetchStock,
-  fetchLots,
-  syncStockRow,
-  batchUpdate,
-  appendRows,
-  getNextLotId,
-  ensureLotsSheet,
-  SHEETS,
-  Location,
-} from "@/lib/sheets";
+//
+// MIGRATED to Supabase — previously 100% Google Sheets. Transfers move
+// physical stock between Kochi and Bangalore. Because lots carry FIFO cost
+// basis, a transfer moves the lot(s) themselves (oldest first) rather than
+// just adjusting a single number — the receiving location gets an
+// equivalent new lot with the SAME unit_purchase_price, so cost history and
+// FIFO ordering both survive the move intact.
 
-// Transfers move physical stock between Kochi and Bangalore.
-// Because lots carry FIFO cost basis, a transfer must move the lot(s)
-// themselves (oldest first) rather than just adjusting a single number —
-// otherwise the receiving location loses its true cost history.
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+
+function getSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key)
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key);
+}
+
+async function getNextLotId(
+  supabase: ReturnType<typeof getSupabase>,
+): Promise<string> {
+  const { data } = await supabase
+    .from("lots")
+    .select("lot_id")
+    .like("lot_id", "LOT-%")
+    .order("lot_id", { ascending: false })
+    .limit(1);
+  const last = data?.[0]?.lot_id ?? "LOT-0000";
+  const num = parseInt(last.replace("LOT-", ""), 10) || 0;
+  return `LOT-${String(num + 1).padStart(4, "0")}`;
+}
+
+async function getNextTxnId(
+  supabase: ReturnType<typeof getSupabase>,
+): Promise<string> {
+  const { data } = await supabase
+    .from("transactions")
+    .select("txn_id")
+    .like("txn_id", "TXN-%")
+    .order("txn_id", { ascending: false })
+    .limit(1);
+  const last = data?.[0]?.txn_id ?? "TXN-0000";
+  const num = parseInt(last.replace("TXN-", ""), 10) || 0;
+  return `TXN-${String(num + 1).padStart(4, "0")}`;
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -47,129 +76,131 @@ export async function POST(req: Request) {
       );
     }
 
-    const products = await fetchProducts();
-    const product = products.find((p) => p.model === model);
-    if (!product) {
-      return NextResponse.json({ error: "Product not found" }, { status: 404 });
-    }
+    const supabase = getSupabase();
+    const requestedQty = Number(qty);
+    const txnDate = date ?? new Date().toISOString().split("T")[0];
 
-    await ensureLotsSheet();
-    const lots = await fetchLots();
-    const sourceLots = lots
-      .filter(
-        (l) =>
-          l.itemCode === product.itemCode &&
-          l.location === (fromLocation as Location) &&
-          l.remainingQty > 0,
+    // 1. Load open source lots for this model+location, oldest first —
+    //    same FIFO ordering used by dispatch.
+    const { data: sourceLots, error: lotsErr } = await supabase
+      .from("lots")
+      .select(
+        "lot_id, date, model, location, remaining_qty, unit_purchase_price, vendor, po_invoice, serial_numbers",
       )
-      .sort((a, b) => {
-        const da = new Date(a.date).getTime();
-        const db = new Date(b.date).getTime();
-        if (!isNaN(da) && !isNaN(db) && da !== db) return da - db;
-        return a.lotId.localeCompare(b.lotId);
-      });
+      .eq("model", model)
+      .eq("location", fromLocation)
+      .gt("remaining_qty", 0)
+      .order("date", { ascending: true })
+      .order("lot_id", { ascending: true });
 
-    const available = sourceLots.reduce((s, l) => s + l.remainingQty, 0);
-    if (available < Number(qty)) {
+    if (lotsErr) throw lotsErr;
+
+    const available = (sourceLots ?? []).reduce(
+      (s: number, l: any) => s + Number(l.remaining_qty),
+      0,
+    );
+    if (available < requestedQty) {
       return NextResponse.json(
         {
-          error: `Insufficient stock in ${fromLocation}. Available: ${available}`,
+          error: `Insufficient stock in ${fromLocation}. Available: ${available}, requested: ${requestedQty}`,
         },
         { status: 400 },
       );
     }
 
-    const txnDate = date ?? new Date().toISOString().split("T")[0];
-    let remaining = Number(qty);
-    const updates: Array<{ range: string; values: unknown[][] }> = [];
-    const newLotRows: unknown[][] = [];
+    // 2. Consume oldest lots first, creating an equivalent lot at the
+    //    destination (same cost basis) for each portion taken.
+    let remaining = requestedQty;
+    const lotUpdates: Array<{ lot_id: string; remaining_qty: number }> = [];
+    const newLotInserts: any[] = [];
 
-    for (const lot of sourceLots) {
+    for (const lot of sourceLots ?? []) {
       if (remaining <= 0) break;
-      const take = Math.min(lot.remainingQty, remaining);
+      const take = Math.min(Number(lot.remaining_qty), remaining);
+      const newLotId = await getNextLotId(supabase);
 
-      // Shrink the source lot
-      updates.push({
-        range: `'${SHEETS.LOTS}'!G${lot.row}`,
-        values: [[lot.remainingQty - take]],
+      lotUpdates.push({
+        lot_id: lot.lot_id,
+        remaining_qty: Number(lot.remaining_qty) - take,
       });
 
-      // Create an equivalent lot at the destination, same cost basis,
-      // so FIFO ordering and cost history travel with the stock.
-      const newLotId = await getNextLotId();
-      newLotRows.push([
-        newLotId,
-        txnDate,
-        product.itemCode,
+      newLotInserts.push({
+        lot_id: newLotId,
+        date: txnDate,
         model,
-        toLocation,
-        take,
-        take,
-        lot.unitPurchasePrice,
-        `Transfer from ${fromLocation}${remarks ? " — " + remarks : ""}`,
-        lot.poOrInvoice,
-      ]);
+        location: toLocation,
+        qty_purchased: take,
+        remaining_qty: take,
+        unit_purchase_price: lot.unit_purchase_price,
+        vendor: `Transfer from ${fromLocation}${remarks ? " — " + remarks : ""}`,
+        po_invoice: lot.po_invoice ?? "",
+        // Serials travel with the stock too — take the first `take` from
+        // this lot's remaining serials (already-purchase-order sorted).
+        serial_numbers: Array.isArray(lot.serial_numbers)
+          ? lot.serial_numbers.slice(0, take)
+          : [],
+      });
 
       remaining -= take;
     }
 
-    await batchUpdate(updates);
-    if (newLotRows.length) {
-      await appendRows(SHEETS.LOTS, "A:J", newLotRows);
+    // 3. Apply lot updates sequentially (Supabase JS client has no native
+    //    multi-row batch update by differing values, so loop it — transfer
+    //    qty is small/manual so this is a handful of calls at most).
+    for (const u of lotUpdates) {
+      const { error } = await supabase
+        .from("lots")
+        .update({ remaining_qty: u.remaining_qty })
+        .eq("lot_id", u.lot_id);
+      if (error) throw error;
     }
 
-    // Update Stock rollups on both sides
-    const stock = await fetchStock();
-    const fromStockRow = stock.find(
-      (s) => s.itemCode === product.itemCode && s.location === fromLocation,
-    );
-    const toStockRow = stock.find(
-      (s) => s.itemCode === product.itemCode && s.location === toLocation,
-    );
-    const newFromStock = (fromStockRow?.currentStock ?? 0) - Number(qty);
-    const newToStock = (toStockRow?.currentStock ?? 0) + Number(qty);
+    const { error: newLotsErr } = await supabase
+      .from("lots")
+      .insert(newLotInserts);
+    if (newLotsErr) throw newLotsErr;
 
-    await syncStockRow(
-      product.itemCode,
+    // 4. Log a Transfer transaction for visibility in Ledger/Transactions.
+    //    Transfers don't affect FIFO cost the way sales/purchases do, so
+    //    unit_price/cost_price are left at 0 — same as the old Sheets version.
+    const txnId = await getNextTxnId(supabase);
+    const { error: txnErr } = await supabase.from("transactions").insert({
+      txn_id: txnId,
+      date: txnDate,
+      type: "Transfer",
       model,
-      product.description,
-      fromLocation as Location,
-      0,
-      0,
+      location: `${fromLocation} → ${toLocation}`,
+      qty: requestedQty,
+      unit_price: 0,
+      total: Number(courierCharges ?? 0),
+      party: remarks ?? "",
+      po_invoice: "",
+      status: "Completed",
+    });
+    if (txnErr) throw txnErr;
+
+    // 5. Return updated totals for both locations (for the UI's optimistic
+    //    "after transfer" preview) — computed fresh from lots.
+    const { data: freshLots, error: freshErr } = await supabase
+      .from("lots")
+      .select("location, remaining_qty")
+      .eq("model", model)
+      .in("location", [fromLocation, toLocation]);
+    if (freshErr) throw freshErr;
+
+    const newFromStock = (freshLots ?? [])
+      .filter((l: any) => l.location === fromLocation)
+      .reduce((s: number, l: any) => s + Number(l.remaining_qty), 0);
+    const newToStock = (freshLots ?? [])
+      .filter((l: any) => l.location === toLocation)
+      .reduce((s: number, l: any) => s + Number(l.remaining_qty), 0);
+
+    return NextResponse.json({
+      success: true,
       newFromStock,
-    );
-    await syncStockRow(
-      product.itemCode,
-      model,
-      product.description,
-      toLocation as Location,
-      Number(qty),
-      0,
       newToStock,
-    );
-
-    // Log as a reference row in Transactions (Type = "Transfer") for visibility,
-    // even though Transfers don't affect FIFO cost the way sales/purchases do.
-    const txnId = `TXN-XFER-${Date.now().toString().slice(-6)}`;
-    await appendRows(SHEETS.TRANSACTIONS, "A:M", [
-      [
-        txnId,
-        txnDate,
-        "Transfer",
-        product.itemCode,
-        model,
-        `${fromLocation} → ${toLocation}`,
-        Number(qty),
-        0,
-        Number(courierCharges ?? 0),
-        remarks ?? "",
-        "",
-        "Completed",
-        "",
-      ],
-    ]);
-
-    return NextResponse.json({ success: true, newFromStock, newToStock });
+      lotsMoved: newLotInserts.length,
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
