@@ -7,9 +7,16 @@
 //      — or Import from Claude JSON / Excel via 📥 Import Invoice
 //   3. Save invoice → Supabase (status: pending_dispatch)
 //   4. Stock is NOT touched here — only on dispatch (from dashboard)
+//
+// UPDATE: Serial numbers entered on each line are now verified live against
+// /api/stock/serials — flags serials that are already sold, don't exist in
+// any open lot, or belong to a different model than the line item claims.
+// This catches mismatches that can slip in via Zoho/Groq import (e.g. an
+// imported model name that doesn't match the serial's actual lot).
 
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import InvoiceImport, { ImportedInvoice } from "@/components/InvoiceImport";
+import GroqSaleScanner from "@/components/GroqSaleScanner";
 
 interface Props {
   products: any[];
@@ -76,6 +83,121 @@ function emptyLine(): LineItem {
     warranty: "",
   };
 }
+
+// ─── Model match check (catalogue) ─────────────────────────────────────────────
+function isModelMatched(products: any[], model: string): boolean {
+  if (!model.trim()) return true; // don't warn on empty/new rows
+  return products.some((p) => p.model.toLowerCase() === model.toLowerCase());
+}
+
+// ─── Generic "did you mean" matching ───────────────────────────────────────
+// No hardcoded aliases — just finds the closest existing catalogue model(s)
+// to whatever was typed/scanned, so any future naming mismatch gets a
+// helpful nudge instead of a silent "not in catalogue".
+
+// Levenshtein distance — small, no dependency needed for product-name-length strings.
+function levenshtein(a: string, b: string): number {
+  const m = a.length,
+    n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, (_, i) =>
+    Array(n + 1)
+      .fill(0)
+      .map((_, j) => (i === 0 ? j : 0)),
+  );
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] =
+        a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Normalises for comparison: lowercase, collapse whitespace/punctuation
+// so "15B Max", "15B-MAX", "15b  max" etc. all compare the same way.
+function normForMatch(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\-_/()+]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Returns the catalogue product(s) most likely to be what the user meant,
+// or [] if nothing is close enough to be worth suggesting.
+function findSimilarProducts(products: any[], typed: string, max = 2): any[] {
+  const query = normForMatch(typed);
+  if (!query) return [];
+
+  const scored = products.map((p) => {
+    const cand = normForMatch(p.model);
+    let score: number;
+
+    // Exact normalized match (e.g. only punctuation/case differed) — treat as
+    // a near-perfect suggestion even if the raw strings didn't match.
+    if (cand === query) {
+      score = 0;
+    } else if (cand.startsWith(query) || query.startsWith(cand)) {
+      // Prefix / substring relationship (e.g. "15B Max" -> "15B Max-01 (TL75)")
+      // is a very strong signal — Fluke's "-01 default variant" pattern.
+      score = 0.5;
+    } else if (cand.includes(query) || query.includes(cand)) {
+      score = 1;
+    } else {
+      // Otherwise fall back to edit distance, normalised by length so short
+      // and long model names are comparable.
+      const dist = levenshtein(query, cand);
+      const normalizedDist = dist / Math.max(query.length, cand.length);
+      score = 2 + normalizedDist; // offset so substring matches always rank above
+    }
+
+    // Tie-breaking nudge: when a bare/ambiguous name (e.g. "15B Max") could
+    // mean either a numbered variant ("-01 (TL75)") or a bundled accessory
+    // set ("... Kit"), the numbered variant is the actual default SKU and
+    // should be suggested first. Small enough to only matter within the
+    // same score tier, never enough to override a genuinely closer match.
+    if (/\bkit\b|\bcombo\b|\bset\b/.test(cand)) score += 0.05;
+    if (/-0\d\b|\b0\d\b/.test(cand)) score -= 0.05;
+
+    return { p, score };
+  });
+
+  return scored
+    .filter((s) => s.score <= 2.35) // cutoff — tune if it feels too loose/strict
+    .sort((a, b) => a.score - b.score)
+    .slice(0, max)
+    .map((s) => s.p);
+}
+
+// ─── Serial number stock verification ──────────────────────────────────────────
+type SerialStatus =
+  | "checking"
+  | "in_stock"
+  | "sold"
+  | "not_found"
+  | "wrong_model"
+  | "idle";
+
+const SERIAL_STATUS_META: Record<
+  Exclude<SerialStatus, "idle">,
+  { text: string; color: string }
+> = {
+  checking: { text: "checking…", color: "var(--text-muted)" },
+  in_stock: { text: "✓ in stock", color: "var(--accent-green)" },
+  sold: { text: "✕ already sold", color: "var(--accent-red)" },
+  not_found: { text: "⚠ not found in stock", color: "var(--accent-amber)" },
+  wrong_model: {
+    text: "⚠ belongs to a different model",
+    color: "var(--accent-amber)",
+  },
+};
 
 // ─── Customer searchbox ────────────────────────────────────────────────────────
 function CustomerSearch({
@@ -633,6 +755,92 @@ export default function RecordSale({ products, onSuccess }: Props) {
   const [showImport, setShowImport] = useState(false);
   const [importNote, setImportNote] = useState("");
 
+  // ── Groq scanner (free vision API) ────────────────────────────────────────
+  const [showGroqScanner, setShowGroqScanner] = useState(false);
+
+  // ── Serial number stock verification ──────────────────────────────────────
+  // Key: `${lineIdx}-${serialIdx}` → status
+  const [serialStatus, setSerialStatus] = useState<
+    Record<string, SerialStatus>
+  >({});
+  const serialCheckTimers = useRef<
+    Record<string, ReturnType<typeof setTimeout>>
+  >({});
+  const serialCheckSeq = useRef<Record<string, number>>({});
+
+  const checkSerial = useCallback(
+    async (
+      lineIdx: number,
+      snIdx: number,
+      serial: string,
+      expectedModel: string,
+      expectedLocation: string,
+    ) => {
+      const key = `${lineIdx}-${snIdx}`;
+      const trimmed = serial.trim();
+
+      if (!trimmed) {
+        setSerialStatus((s) => ({ ...s, [key]: "idle" }));
+        return;
+      }
+
+      // Guard against race conditions: if the user keeps typing, only the
+      // latest request for this key should be allowed to write a result.
+      const seq = (serialCheckSeq.current[key] ?? 0) + 1;
+      serialCheckSeq.current[key] = seq;
+
+      setSerialStatus((s) => ({ ...s, [key]: "checking" }));
+      try {
+        const r = await fetch(
+          `/api/stock/serials?q=${encodeURIComponent(trimmed)}`,
+        );
+        const d = await r.json();
+
+        // Stale response — a newer check has since been fired for this key.
+        if (serialCheckSeq.current[key] !== seq) return;
+
+        const lotMatches = d.lotMatches ?? [];
+        const saleMatches = d.saleMatches ?? [];
+
+        // Already sold to someone — never valid to sell again.
+        const soldMatch = saleMatches.find(
+          (m: any) => m.serial.toLowerCase() === trimmed.toLowerCase(),
+        );
+        if (soldMatch) {
+          setSerialStatus((s) => ({ ...s, [key]: "sold" }));
+          return;
+        }
+
+        const exact = lotMatches.find(
+          (m: any) => m.serial.toLowerCase() === trimmed.toLowerCase(),
+        );
+
+        if (!exact || Number(exact.lotRemainingQty) <= 0) {
+          setSerialStatus((s) => ({ ...s, [key]: "not_found" }));
+          return;
+        }
+
+        const modelOk =
+          !expectedModel ||
+          exact.model.toLowerCase() === expectedModel.toLowerCase();
+        const locationOk =
+          !expectedLocation ||
+          exact.location.toLowerCase() === expectedLocation.toLowerCase();
+
+        if (!modelOk || !locationOk) {
+          setSerialStatus((s) => ({ ...s, [key]: "wrong_model" }));
+          return;
+        }
+
+        setSerialStatus((s) => ({ ...s, [key]: "in_stock" }));
+      } catch {
+        if (serialCheckSeq.current[key] !== seq) return;
+        setSerialStatus((s) => ({ ...s, [key]: "idle" }));
+      }
+    },
+    [],
+  );
+
   const handleImported = (data: ImportedInvoice) => {
     // Header fields
     if (data.invoiceNumber) setInvoiceNum(data.invoiceNumber);
@@ -672,7 +880,21 @@ export default function RecordSale({ products, onSuccess }: Props) {
       };
     });
 
-    if (importedLines.length > 0) setLines(importedLines);
+    if (importedLines.length > 0) {
+      setLines(importedLines);
+      // Reset old serial-check state — indices no longer correspond to
+      // whatever was there before, and kick off checks for the freshly
+      // imported serials so mismatches surface immediately.
+      setSerialStatus({});
+      serialCheckSeq.current = {};
+      importedLines.forEach((line, lineIdx) => {
+        line.serialNumbers.forEach((serial, snIdx) => {
+          if (serial.trim()) {
+            checkSerial(lineIdx, snIdx, serial, line.model, location);
+          }
+        });
+      });
+    }
 
     // Customer note — importing can't auto-select a Supabase customer,
     // so show a hint with the extracted name for manual selection
@@ -702,8 +924,23 @@ export default function RecordSale({ products, onSuccess }: Props) {
     );
 
   const addLine = () => setLines((prev) => [...prev, emptyLine()]);
-  const removeLine = (i: number) =>
+  const removeLine = (i: number) => {
     setLines((prev) => prev.filter((_, idx) => idx !== i));
+    // Drop any serial-status entries belonging to this line, and shift
+    // down the keys for every line after it so they stay aligned with the
+    // new (post-removal) indices.
+    setSerialStatus((prev) => {
+      const next: Record<string, SerialStatus> = {};
+      for (const [key, status] of Object.entries(prev)) {
+        const [lineIdxStr, snIdxStr] = key.split("-");
+        const lineIdx = Number(lineIdxStr);
+        if (lineIdx === i) continue;
+        const newLineIdx = lineIdx > i ? lineIdx - 1 : lineIdx;
+        next[`${newLineIdx}-${snIdxStr}`] = status;
+      }
+      return next;
+    });
+  };
 
   const onProductSelect = (i: number, p: any) => {
     const qty = lines[i].qty;
@@ -716,6 +953,16 @@ export default function RecordSale({ products, onSuccess }: Props) {
       warranty: p.warranty ? String(p.warranty) : "",
       serialNumbers: Array.from({ length: qty }, () => ""),
     });
+    // Model changed — clear stale serial statuses for this line and
+    // re-check any serials that are still populated against the new model.
+    setSerialStatus((prev) => {
+      const next = { ...prev };
+      for (let si = 0; si < qty; si++) delete next[`${i}-${si}`];
+      return next;
+    });
+    lines[i].serialNumbers.forEach((serial, si) => {
+      if (serial.trim()) checkSerial(i, si, serial, p.model, location);
+    });
   };
 
   const handleQtyChange = (i: number, qty: number) => {
@@ -726,13 +973,61 @@ export default function RecordSale({ products, onSuccess }: Props) {
         ? [...curr, ...Array.from({ length: safe - curr.length }, () => "")]
         : curr.slice(0, safe);
     setLine(i, { qty: safe, serialNumbers: newSN });
+    // Drop status entries for serial slots that no longer exist on this line.
+    if (safe < curr.length) {
+      setSerialStatus((prev) => {
+        const next = { ...prev };
+        for (let si = safe; si < curr.length; si++) delete next[`${i}-${si}`];
+        return next;
+      });
+    }
   };
 
   const handleSerialChange = (lineIdx: number, snIdx: number, val: string) => {
     const sns = [...lines[lineIdx].serialNumbers];
     sns[snIdx] = val;
     setLine(lineIdx, { serialNumbers: sns });
+
+    const key = `${lineIdx}-${snIdx}`;
+    if (serialCheckTimers.current[key]) {
+      clearTimeout(serialCheckTimers.current[key]);
+    }
+    // Optimistically clear the old status right away so a stale ✓/✕ badge
+    // doesn't linger while the user is still typing.
+    setSerialStatus((s) => ({ ...s, [key]: val.trim() ? "checking" : "idle" }));
+    serialCheckTimers.current[key] = setTimeout(() => {
+      checkSerial(lineIdx, snIdx, val, lines[lineIdx].model, location);
+    }, 500);
   };
+
+  // Re-check every populated serial when the dispatch location changes,
+  // since a serial valid for Kochi may not be valid for Bangalore.
+  useEffect(() => {
+    lines.forEach((line, lineIdx) => {
+      line.serialNumbers.forEach((serial, snIdx) => {
+        if (serial.trim()) {
+          checkSerial(lineIdx, snIdx, serial, line.model, location);
+        }
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location]);
+
+  // Clean up any pending debounce timers on unmount.
+  useEffect(() => {
+    const timers = serialCheckTimers.current;
+    return () => {
+      Object.values(timers).forEach((t) => clearTimeout(t));
+    };
+  }, []);
+
+  const hasBlockingSerialIssues = useMemo(
+    () =>
+      Object.values(serialStatus).some(
+        (s) => s === "sold" || s === "not_found" || s === "wrong_model",
+      ),
+    [serialStatus],
+  );
 
   const handleSave = async () => {
     if (!invoiceNum.trim()) {
@@ -837,6 +1132,18 @@ export default function RecordSale({ products, onSuccess }: Props) {
         />
       )}
 
+      {/* ── Groq scanner modal (free) ── */}
+      {showGroqScanner && (
+        <GroqSaleScanner
+          products={products}
+          onExtracted={(data) => {
+            handleImported(data);
+            setShowGroqScanner(false);
+          }}
+          onClose={() => setShowGroqScanner(false)}
+        />
+      )}
+
       {/* Invoice header */}
       <div style={card}>
         <div
@@ -848,19 +1155,34 @@ export default function RecordSale({ products, onSuccess }: Props) {
           }}
         >
           <span>Invoice details</span>
-          <button
-            className="btn-ghost"
-            style={{
-              fontSize: 11,
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-            }}
-            onClick={() => setShowImport(true)}
-            type="button"
-          >
-            📥 Import Invoice (Claude JSON / Excel)
-          </button>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              className="btn-ghost"
+              style={{
+                fontSize: 11,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+              onClick={() => setShowImport(true)}
+              type="button"
+            >
+              📥 Import Invoice (Claude JSON / Excel)
+            </button>
+            <button
+              className="btn-ghost"
+              style={{
+                fontSize: 11,
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+              }}
+              onClick={() => setShowGroqScanner(true)}
+              type="button"
+            >
+              📸 Scan (Groq, free)
+            </button>
+          </div>
         </div>
         <div
           style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
@@ -977,6 +1299,10 @@ export default function RecordSale({ products, onSuccess }: Props) {
             const effectivePrice =
               line.unitSalePrice * (1 - line.discount / 100);
             const lineTotal = effectivePrice * line.qty;
+            const modelMatched = isModelMatched(products, line.model);
+            const suggestions = !modelMatched
+              ? findSimilarProducts(products, line.model)
+              : [];
 
             return (
               <div
@@ -995,6 +1321,8 @@ export default function RecordSale({ products, onSuccess }: Props) {
                     justifyContent: "space-between",
                     alignItems: "center",
                     marginBottom: 8,
+                    flexWrap: "wrap",
+                    gap: 6,
                   }}
                 >
                   <span
@@ -1004,6 +1332,10 @@ export default function RecordSale({ products, onSuccess }: Props) {
                       color: "var(--text-muted)",
                       textTransform: "uppercase",
                       letterSpacing: "0.05em",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      flexWrap: "wrap",
                     }}
                   >
                     Item {i + 1}
@@ -1013,6 +1345,71 @@ export default function RecordSale({ products, onSuccess }: Props) {
                       >
                         {" "}
                         · {line.model}
+                      </span>
+                    )}
+                    {line.model && !modelMatched && (
+                      <span
+                        style={{
+                          fontSize: 9,
+                          padding: "1px 7px",
+                          borderRadius: 99,
+                          background: "rgba(245,158,11,0.12)",
+                          color: "var(--accent-amber)",
+                          fontWeight: 700,
+                          textTransform: "none",
+                          letterSpacing: 0,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        {suggestions.length > 0 ? (
+                          <>
+                            ⚠ not found — did you mean{" "}
+                            {suggestions.map((s, si) => (
+                              <span key={s.model}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onProductSelect(i, s);
+                                  }}
+                                  style={{
+                                    background: "none",
+                                    border: "none",
+                                    padding: 0,
+                                    color: "var(--accent-amber)",
+                                    textDecoration: "underline",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                    fontSize: 9,
+                                  }}
+                                >
+                                  {s.model}
+                                </button>
+                                {si < suggestions.length - 1 ? " or " : "?"}
+                              </span>
+                            ))}
+                          </>
+                        ) : (
+                          "⚠ not in catalogue"
+                        )}
+                      </span>
+                    )}
+                    {line.model && modelMatched && (
+                      <span
+                        style={{
+                          fontSize: 9,
+                          padding: "1px 7px",
+                          borderRadius: 99,
+                          background: "rgba(34,197,94,0.1)",
+                          color: "var(--accent-green)",
+                          fontWeight: 700,
+                          textTransform: "none",
+                          letterSpacing: 0,
+                        }}
+                      >
+                        ✓ matched
                       </span>
                     )}
                   </span>
@@ -1040,11 +1437,21 @@ export default function RecordSale({ products, onSuccess }: Props) {
                   style={{ gridTemplateColumns: "2fr 1fr 1fr 1fr 1fr" }}
                 >
                   <FG label="Model / Product">
-                    <ModelCombobox
-                      products={products}
-                      value={line.model}
-                      onSelect={(p) => onProductSelect(i, p)}
-                    />
+                    <div
+                      style={{
+                        borderRadius: 6,
+                        boxShadow:
+                          line.model && !modelMatched
+                            ? "0 0 0 1px rgba(245,158,11,0.5)"
+                            : undefined,
+                      }}
+                    >
+                      <ModelCombobox
+                        products={products}
+                        value={line.model}
+                        onSelect={(p) => onProductSelect(i, p)}
+                      />
+                    </div>
                   </FG>
                   <FG label="HSN code">
                     <input
@@ -1114,21 +1521,27 @@ export default function RecordSale({ products, onSuccess }: Props) {
                   </FG>
                 </div>
 
-                {/* Serial numbers */}
+                {/* Serial numbers — now with live stock verification */}
                 {line.qty > 0 && (
                   <div style={{ marginTop: 10 }}>
                     <div
                       style={{
-                        fontSize: 10,
-                        color: "var(--text-muted)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
                         marginBottom: 6,
+                        flexWrap: "wrap",
+                        gap: 6,
                       }}
                     >
-                      Serial numbers — {line.qty} unit
-                      {line.qty !== 1 ? "s" : ""}
-                      <span style={{ marginLeft: 6, opacity: 0.7 }}>
-                        (optional, leave blank if not applicable)
-                      </span>
+                      <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                        Serial numbers — {line.qty} unit
+                        {line.qty !== 1 ? "s" : ""}
+                        <span style={{ marginLeft: 6, opacity: 0.7 }}>
+                          (optional, leave blank if not applicable — entered
+                          serials are checked against live stock)
+                        </span>
+                      </div>
                     </div>
                     <div
                       style={{
@@ -1137,27 +1550,56 @@ export default function RecordSale({ products, onSuccess }: Props) {
                         gap: 6,
                       }}
                     >
-                      {Array.from({ length: line.qty }).map((_, si) => (
-                        <div key={si}>
-                          <div
-                            style={{
-                              fontSize: 9,
-                              color: "var(--text-muted)",
-                              marginBottom: 2,
-                            }}
-                          >
-                            Unit {si + 1}
+                      {Array.from({ length: line.qty }).map((_, si) => {
+                        const key = `${i}-${si}`;
+                        const status = serialStatus[key] ?? "idle";
+                        const badge =
+                          status === "idle" ? null : SERIAL_STATUS_META[status];
+                        const isProblem =
+                          status === "sold" ||
+                          status === "not_found" ||
+                          status === "wrong_model";
+                        return (
+                          <div key={si}>
+                            <div
+                              style={{
+                                fontSize: 9,
+                                color: "var(--text-muted)",
+                                marginBottom: 2,
+                              }}
+                            >
+                              Unit {si + 1}
+                            </div>
+                            <input
+                              className="rs-snfield"
+                              value={line.serialNumbers[si] ?? ""}
+                              placeholder="S/N"
+                              onChange={(e) =>
+                                handleSerialChange(i, si, e.target.value)
+                              }
+                              style={{
+                                borderColor: isProblem
+                                  ? "rgba(239,68,68,0.6)"
+                                  : status === "in_stock"
+                                    ? "rgba(34,197,94,0.5)"
+                                    : undefined,
+                              }}
+                            />
+                            {badge && (
+                              <div
+                                style={{
+                                  fontSize: 9,
+                                  color: badge.color,
+                                  marginTop: 2,
+                                  lineHeight: 1.4,
+                                }}
+                              >
+                                {badge.text}
+                              </div>
+                            )}
                           </div>
-                          <input
-                            className="rs-snfield"
-                            value={line.serialNumbers[si] ?? ""}
-                            placeholder="S/N"
-                            onChange={(e) =>
-                              handleSerialChange(i, si, e.target.value)
-                            }
-                          />
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -1245,6 +1687,36 @@ export default function RecordSale({ products, onSuccess }: Props) {
         </div>
       </div>
 
+      {/* Serial issue warning */}
+      {hasBlockingSerialIssues && (
+        <div
+          style={{
+            background: "rgba(239,68,68,0.07)",
+            border: "1px solid rgba(239,68,68,0.3)",
+            borderRadius: 8,
+            padding: "10px 14px",
+            fontSize: 12,
+            color: "var(--accent-red)",
+            display: "flex",
+            gap: 8,
+            alignItems: "flex-start",
+          }}
+        >
+          <span style={{ fontSize: 16, flexShrink: 0 }}>✕</span>
+          <div>
+            <div style={{ fontWeight: 600 }}>
+              One or more serial numbers look wrong
+            </div>
+            <div style={{ marginTop: 2, fontSize: 11, opacity: 0.85 }}>
+              Some entered serials are already sold, don't exist in any open
+              lot, or belong to a different model/location than this line
+              claims. Fix or clear them above — this won't block saving, but
+              dispatch will fail later if the serial genuinely isn't available.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stock notice */}
       <div
         style={{
@@ -1308,6 +1780,12 @@ export default function RecordSale({ products, onSuccess }: Props) {
             setNotes("");
             setError("");
             setImportNote("");
+            setSerialStatus({});
+            serialCheckSeq.current = {};
+            Object.values(serialCheckTimers.current).forEach((t) =>
+              clearTimeout(t),
+            );
+            serialCheckTimers.current = {};
           }}
         >
           Clear

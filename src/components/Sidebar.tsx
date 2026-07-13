@@ -85,6 +85,7 @@ const NAV: NavSection[] = [
     icon: "⚙",
     items: [
       { id: "stock_serials", label: "Stock & Serials", icon: "🔢" },
+      { id: "bin", label: "Bin", icon: "🗑" },
       { id: "audit_log", label: "Audit Log", icon: "🔍" },
       { id: "ledger", label: "Ledger", icon: "📒" },
       { id: "downloads", label: "Downloads", icon: "↧" },

@@ -1,9 +1,9 @@
 "use client";
 import { useState, useMemo, useRef, useEffect } from "react";
-import InvoiceScanner from "@/components/InvoiceScanner";
 import PurchaseImport, {
   ImportedPurchaseBill,
 } from "@/components/PurchaseImport";
+import GroqPurchaseScanner from "@/components/GroqPurchaseScanner";
 
 interface Props {
   products: any[];
@@ -234,11 +234,11 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  // ── Scanner (Gemini/Claude AI scan) ──────────────────────────────────────
-  const [showScanner, setShowScanner] = useState(false);
-
   // ── Bulk import (Claude JSON / Excel — zero cost) ────────────────────────
   const [showImport, setShowImport] = useState(false);
+
+  // ── Groq scanner (free vision API — alternative to paid Claude scan) ────
+  const [showGroqScanner, setShowGroqScanner] = useState(false);
   const [pendingQueue, setPendingQueue] = useState<
     Array<{
       model: string;
@@ -277,33 +277,6 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
       next[idx] = value;
       return next;
     });
-  };
-
-  // ── Handler called when AI scan completes ──────────────────────────────────
-  const handleScanned = (data: any) => {
-    setSupplier(data.vendorOrCustomer ?? "");
-    setPoNumber(data.invoiceNumber ?? "");
-    setDate(data.invoiceDate ?? today);
-    if (data.lineItems.length > 1) setBatchMode(true);
-    const first = data.lineItems[0];
-    if (first) {
-      setModel(first.model ?? "");
-      handleQtyChange(first.qty ?? "");
-      setCustomFinal(first.unitPrice ?? "");
-      setBaseDiscount(first.discount ?? 0);
-      setAddDiscount(0);
-      if (first.serialNumbers) {
-        const sns = String(first.serialNumbers)
-          .split(",")
-          .map((s: string) => s.trim())
-          .filter(Boolean);
-        const qtyNum = Number(first.qty) || sns.length;
-        setSerialNumbers(
-          Array.from({ length: qtyNum }, (_, i) => sns[i] ?? ""),
-        );
-      }
-    }
-    setShowScanner(false);
   };
 
   // ── Handler called when bulk import completes ───────────────────────────
@@ -579,22 +552,24 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* ── Scanner modal ── */}
-      {showScanner && (
-        <InvoiceScanner
-          mode="purchase"
-          products={products}
-          onExtracted={handleScanned}
-          onClose={() => setShowScanner(false)}
-        />
-      )}
-
       {/* ── Bulk import modal ── */}
       {showImport && (
         <PurchaseImport
           products={products}
           onImported={handleImported}
           onClose={() => setShowImport(false)}
+        />
+      )}
+
+      {/* ── Groq scanner modal (free) ── */}
+      {showGroqScanner && (
+        <GroqPurchaseScanner
+          products={products}
+          onExtracted={(data) => {
+            handleImported(data);
+            setShowGroqScanner(false);
+          }}
+          onClose={() => setShowGroqScanner(false)}
         />
       )}
 
@@ -801,10 +776,10 @@ export default function RecordPurchase({ products, onSuccess }: Props) {
                 alignItems: "center",
                 gap: 5,
               }}
-              onClick={() => setShowScanner(true)}
+              onClick={() => setShowGroqScanner(true)}
               type="button"
             >
-              🤖 Scan Invoice
+              📸 Scan (Groq, free)
             </button>
           </div>
         </div>

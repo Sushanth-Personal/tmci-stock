@@ -104,3 +104,49 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
+
+// Update item_code and/or hsn on an EXISTING product, matched by model.
+// Used by the Groq purchase scanner's item-code/HSN verification step:
+// auto-fills when the field was blank, or applies the value the user picked
+// after reviewing a conflict against what's already in Supabase.
+export async function PATCH(req: Request) {
+  try {
+    const body = await req.json();
+    const { model, itemCode, hsn } = body;
+
+    if (!model) {
+      return NextResponse.json({ error: "model is required" }, { status: 400 });
+    }
+    if (itemCode === undefined && hsn === undefined) {
+      return NextResponse.json(
+        { error: "Nothing to update — provide itemCode and/or hsn" },
+        { status: 400 },
+      );
+    }
+
+    const supabase = getSupabase();
+    const patch: Record<string, any> = { updated_at: new Date().toISOString() };
+    if (itemCode !== undefined) patch.item_code = itemCode || null;
+    if (hsn !== undefined) patch.hsn = hsn || null;
+
+    const { error, data } = await supabase
+      .from("products")
+      .update(patch)
+      .ilike("model", model)
+      .select("model")
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) {
+      return NextResponse.json(
+        { error: `Model "${model}" not found in catalogue` },
+        { status: 404 },
+      );
+    }
+
+    return NextResponse.json({ success: true, model: data.model });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
