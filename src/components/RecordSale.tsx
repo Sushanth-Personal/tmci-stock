@@ -203,9 +203,11 @@ const SERIAL_STATUS_META: Record<
 function CustomerSearch({
   onSelect,
   selected,
+  hasError,
 }: {
   onSelect: (c: Customer | null) => void;
   selected: Customer | null;
+  hasError?: boolean;
 }) {
   const [query, setQuery] = useState(selected?.name ?? "");
   const [results, setResults] = useState<Customer[]>([]);
@@ -384,7 +386,22 @@ function CustomerSearch({
               setOpen(true);
               if (!query) search("");
             }}
+            style={{
+              borderColor: hasError ? "var(--accent-red)" : undefined,
+              boxShadow: hasError ? "0 0 0 1px var(--accent-red)" : undefined,
+            }}
           />
+          {hasError && (
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--accent-red)",
+                marginTop: 4,
+              }}
+            >
+              Customer is required
+            </div>
+          )}
           {open && (
             <div
               style={{
@@ -750,6 +767,7 @@ export default function RecordSale({ products, onSuccess }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [customerError, setCustomerError] = useState(false);
 
   // ── Invoice Import (Claude JSON / Excel) ──────────────────────────────────
   const [showImport, setShowImport] = useState(false);
@@ -1030,14 +1048,17 @@ export default function RecordSale({ products, onSuccess }: Props) {
   );
 
   const handleSave = async () => {
+    setCustomerError(false);
     if (!invoiceNum.trim()) {
       setError("Invoice number is required.");
       return;
     }
     if (!customer) {
       setError("Please select or create a customer.");
+      setCustomerError(true);
       return;
     }
+    setCustomerError(false);
     const validLines = lines.filter(
       (l) => l.model && l.qty > 0 && l.unitSalePrice > 0,
     );
@@ -1271,7 +1292,14 @@ export default function RecordSale({ products, onSuccess }: Props) {
             </button>
           </div>
         )}
-        <CustomerSearch selected={customer} onSelect={setCustomer} />
+        <CustomerSearch
+          selected={customer}
+          onSelect={(c) => {
+            setCustomer(c);
+            if (c) setCustomerError(false);
+          }}
+          hasError={customerError}
+        />
       </div>
 
       {/* Line items */}
@@ -1779,6 +1807,7 @@ export default function RecordSale({ products, onSuccess }: Props) {
             setCustomer(null);
             setNotes("");
             setError("");
+            setCustomerError(false);
             setImportNote("");
             setSerialStatus({});
             serialCheckSeq.current = {};

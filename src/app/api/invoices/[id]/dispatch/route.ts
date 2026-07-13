@@ -1,3 +1,38 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+
+function getSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key)
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key);
+}
+
+// Normalise for matching model names against lots — trim + collapse
+// internal whitespace + lowercase, same convention used in /api/stock and
+// /api/purchases so dispatch matching doesn't silently miss on stray
+// whitespace/case differences between the invoice line and the lots table.
+function normModel(s: unknown): string {
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+async function getNextTxnId(
+  supabase: ReturnType<typeof getSupabase>,
+): Promise<string> {
+  const { data } = await supabase
+    .from("transactions")
+    .select("txn_id")
+    .like("txn_id", "TXN-%")
+    .order("txn_id", { ascending: false })
+    .limit(1);
+  const last = data?.[0]?.txn_id ?? "TXN-0000";
+  const num = parseInt(last.replace("TXN-", ""), 10) || 0;
+  return `TXN-${String(num + 1).padStart(4, "0")}`;
+}
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
