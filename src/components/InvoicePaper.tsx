@@ -193,7 +193,14 @@ export default function InvoicePaper({
           line-height: 1.5;
         }
         .ip-paper * { color: #1a1a1a; }
-        .ip-inner { border: 1.5px solid #333; }
+        .ip-inner {
+          border: 1.5px solid #333;
+          min-height: 1450px; /* real A4 proportions at this width — the
+                                 actual invoice leaves this much blank
+                                 space below the signature line */
+          display: flex;
+          flex-direction: column;
+        }
         .ip-header-block { display: flex; justify-content: space-between; align-items: flex-start; padding: 14px 16px; }
         .ip-meta-block {
           display: grid; grid-template-columns: 55% 45%;
@@ -204,7 +211,7 @@ export default function InvoicePaper({
         .ip-meta-row { display: flex; font-size: 12.5px; padding: 1.5px 0; }
         .ip-meta-row .k { width: 120px; flex-shrink: 0; }
         .ip-meta-row .v { font-weight: 700; }
-        .ip-section { padding: 10px 16px; }
+        .ip-section { padding: 10px 16px 40px; }
         .ip-hr { border: none; border-top: 1.5px solid #333; margin: 14px 0; }
         .ip-meta-table { border-collapse: collapse !important; width: 100% !important; }
         .ip-meta-table td {
@@ -407,7 +414,7 @@ export default function InvoicePaper({
                         </div>
                       )}
                     </td>
-                    <td>{l.hsn || "—"}</td>{" "}
+                    <td>{l.hsn}</td>
                     <td style={{ textAlign: "right" }}>
                       {l.qty.toFixed(2)}
                       <br />

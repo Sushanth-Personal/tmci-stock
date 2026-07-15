@@ -1,6 +1,6 @@
 ========================================
   TMCI CODEBASE DUMP
-  Generated: Mon Jul 13 09:42:32 IST 2026
+  Generated: Thu Jul 16 00:42:36 IST 2026
   Root: /Users/sushanthp/TMCI/Stock Website/tmci-stock-nextjs
 ========================================
 
@@ -207,114 +207,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ customer: mapCustomer(data) });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
-  }
-}
-
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FILE: ./src/app/api/dashboard/route.ts
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// src/app/api/dashboard/route.ts
-import { NextResponse } from "next/server";
-import {
-  fetchProducts,
-  fetchStock,
-  fetchTransactions,
-  fetchLots,
-} from "@/lib/sheets";
-
-export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const from = searchParams.get("from");
-    const to = searchParams.get("to");
-    const location = searchParams.get("location") ?? "both";
-
-    const [products, stock, transactions, lots] = await Promise.all([
-      fetchProducts(),
-      fetchStock(),
-      fetchTransactions(),
-      fetchLots(),
-    ]);
-
-    const filterDate = (dateStr: string) => {
-      if (!from && !to) return true;
-      const d = new Date(dateStr);
-      if (isNaN(d.getTime())) return false;
-      if (from && d < new Date(from)) return false;
-      if (to && d > new Date(to)) return false;
-      return true;
-    };
-
-    const sales = transactions.filter(
-      (t) =>
-        t.type === "Sale" &&
-        filterDate(t.date) &&
-        (location === "both" || t.location === location),
-    );
-    const purchases = transactions.filter(
-      (t) =>
-        t.type === "Purchase" &&
-        filterDate(t.date) &&
-        (location === "both" || t.location === location),
-    );
-
-    // Stock value = sum across OPEN LOTS at each lot's own purchase price
-    // (true FIFO valuation), not a flat per-model cost price.
-    const openLots = lots.filter((l) => l.remainingQty > 0);
-    const kochiValue = openLots
-      .filter((l) => l.location === "Kochi")
-      .reduce((s, l) => s + l.remainingQty * l.unitPurchasePrice, 0);
-    const bloreValue = openLots
-      .filter((l) => l.location === "Bangalore")
-      .reduce((s, l) => s + l.remainingQty * l.unitPurchasePrice, 0);
-
-    const kochiItems = stock
-      .filter((s) => s.location === "Kochi")
-      .reduce((sum, s) => sum + s.currentStock, 0);
-    const bloreItems = stock
-      .filter((s) => s.location === "Bangalore")
-      .reduce((sum, s) => sum + s.currentStock, 0);
-
-    const totalSalesValue = sales.reduce((sum, s) => sum + s.total, 0);
-    const totalSalesCost = sales.reduce(
-      (sum, s) => sum + s.qty * (s.costPrice ?? 0),
-      0,
-    );
-    const grossMargin =
-      totalSalesValue > 0
-        ? ((totalSalesValue - totalSalesCost) / totalSalesValue) * 100
-        : 0;
-
-    const totalPurchaseValue = purchases.reduce((sum, p) => sum + p.total, 0);
-
-    const salesByModel: Record<string, { units: number; value: number }> = {};
-    for (const s of sales) {
-      if (!salesByModel[s.model])
-        salesByModel[s.model] = { units: 0, value: 0 };
-      salesByModel[s.model].units += s.qty;
-      salesByModel[s.model].value += s.total;
-    }
-    const topMovers = Object.entries(salesByModel)
-      .sort((a, b) => b[1].value - a[1].value)
-      .slice(0, 5)
-      .map(([model, data]) => ({ model, ...data }));
-
-    return NextResponse.json({
-      stockValue: kochiValue + bloreValue,
-      salesValue: totalSalesValue,
-      purchasesValue: totalPurchaseValue,
-      grossMargin,
-      kochiItems,
-      bloreItems,
-      kochiValue,
-      bloreValue,
-      topMovers,
-      productCount: products.length,
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -596,6 +488,45 @@ export async function DELETE(
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FILE: ./src/app/api/invoices/[id]/dispatch/route.ts
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// src/app/api/invoices/[id]/dispatch/route.ts
+//
+// PATCH — dispatches a pending invoice: consumes FIFO lots (or exact
+// serial-matched units), logs Sale transactions, marks invoice dispatched.
+//
+// SERIAL RESOLUTION: entered serials go through three tiers:
+//   1. Exact match against a lot's recorded serial_numbers — the normal case.
+//   2. A user-confirmed assignment (serialLotAssignments in the request body)
+//      — for units purchased before this app tracked serials at all, where
+//      the lot exists and has open stock, but never recorded which serial
+//      belongs to which unit.
+//   3. Neither of the above, but stock IS available for that model/location
+//      — instead of failing, we return `needsSerialAssignment: true` with a
+//      list of candidate lots so the client can ask the user which purchase
+//      this unit actually came from, then retry with that answer.
+// Only a genuine stock shortage (no open lots at all) is a hard failure.
+
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+
+function getSupabase() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key)
+    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key);
+}
+
+// Normalise for matching model names against lots — trim + collapse
+// internal whitespace + lowercase, same convention used in /api/stock and
+// /api/purchases so dispatch matching doesn't silently miss on stray
+// whitespace/case differences between the invoice line and the lots table.
+function normModel(s: unknown): string {
+  return String(s ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -605,6 +536,11 @@ export async function PATCH(
     const body = await req.json().catch(() => ({}));
     const dispatchedAt: string =
       body.dispatched_at || new Date().toISOString().split("T")[0];
+    // { "<serial>": "<lot_id>" } — how the user resolved any serials that
+    // were entered on the sale but were never recorded at purchase time
+    // (units bought before this app tracked serials).
+    const serialLotAssignments: Record<string, string> =
+      body.serialLotAssignments ?? {};
 
     const supabase = getSupabase();
 
@@ -641,7 +577,7 @@ export async function PATCH(
     const { data: allLots, error: lotsErr } = await supabase
       .from("lots")
       .select(
-        "lot_id, model, remaining_qty, unit_purchase_price, date, serial_numbers",
+        "lot_id, model, remaining_qty, unit_purchase_price, date, serial_numbers, vendor, po_invoice",
       )
       .eq("location", location)
       .gt("remaining_qty", 0)
@@ -657,14 +593,43 @@ export async function PATCH(
       lotsByModel.get(key)!.push(lot);
     }
 
-    // 3. Pre-flight check: verify enough stock exists for EVERY line before
-    //    changing anything (all-or-nothing dispatch). Lines with serial
-    //    numbers entered are validated serial-by-serial — every serial must
-    //    exist in an open lot for this model+location, and no serial may be
-    //    used twice within the same invoice. Lines with no serials entered
-    //    fall back to a plain qty-available check (auto-FIFO).
+    // Tracks how much of each lot's remaining_qty has been provisionally
+    // spoken for during THIS request's pre-flight pass, so multiple serials
+    // /lines on the same invoice can't over-allocate a lot that only has a
+    // few units left.
+    const provisional = new Map<string, number>(); // lot_id -> qty reserved
+    const availableInLot = (lot: any) =>
+      Number(lot.remaining_qty) - (provisional.get(lot.lot_id) ?? 0);
+
+    // 3. Pre-flight: resolve every entered serial to a lot (exact match,
+    //    then confirmed assignment, then "ask the user"), and check plain
+    //    qty availability for non-serialed lines. Lines with serial numbers
+    //    entered are validated serial-by-serial — every serial must exist
+    //    in an open lot, be explicitly assigned to one, or (if stock
+    //    exists at all) get queued up for the user to assign. No serial may
+    //    be used twice within the same invoice.
     const shortages: string[] = [];
+    const needsAssignment: Array<{
+      model: string;
+      location: string;
+      serial: string;
+      candidateLots: Array<{
+        lot_id: string;
+        date: string;
+        vendor: string;
+        po_invoice: string;
+        remaining_qty: number;
+      }>;
+    }> = [];
     const seenSerialsThisInvoice = new Set<string>();
+    // serial -> resolved lot_id (matched or assigned), consumed in step 4.
+    const resolvedSerialLot = new Map<string, string>();
+    // serial -> lot_id, but ONLY for retroactive assignments (units that
+    // were never serial-tracked at purchase time). These need the
+    // ORIGINAL PURCHASE transaction backfilled with the now-known serial,
+    // in addition to the resulting Sale transaction — otherwise the
+    // purchase-side record permanently under-represents what was bought.
+    const retroactiveAssignments = new Map<string, string>();
 
     for (const item of lineItems) {
       const key = normModel(item.model);
@@ -690,25 +655,100 @@ export async function PATCH(
           }
           seenSerialsThisInvoice.add(serial);
 
+          // (a) Exact match against a lot's recorded serials — normal path.
           const ownerLot = lots.find(
             (l) =>
-              Number(l.remaining_qty) > 0 &&
+              availableInLot(l) > 0 &&
               Array.isArray(l.serial_numbers) &&
               l.serial_numbers.includes(serial),
           );
-          if (!ownerLot) {
+          if (ownerLot) {
+            provisional.set(
+              ownerLot.lot_id,
+              (provisional.get(ownerLot.lot_id) ?? 0) + 1,
+            );
+            resolvedSerialLot.set(serial, ownerLot.lot_id);
+            continue;
+          }
+
+          // (b) User already told us (on a retry) which purchase this
+          // serial's unit came from — validate and accept it.
+          const assignedLotId = serialLotAssignments[serial];
+          if (assignedLotId) {
+            const assignedLot = lots.find((l) => l.lot_id === assignedLotId);
+            if (!assignedLot) {
+              shortages.push(
+                `${item.model}: serial "${serial}" was assigned to lot ${assignedLotId}, but that lot no longer matches this model/location — please re-check.`,
+              );
+              continue;
+            }
+            if (availableInLot(assignedLot) <= 0) {
+              shortages.push(
+                `${item.model}: serial "${serial}" was assigned to lot ${assignedLotId}, but that lot has no stock left after other allocations on this invoice.`,
+              );
+              continue;
+            }
+            provisional.set(
+              assignedLot.lot_id,
+              (provisional.get(assignedLot.lot_id) ?? 0) + 1,
+            );
+            resolvedSerialLot.set(serial, assignedLot.lot_id);
+            retroactiveAssignments.set(serial, assignedLot.lot_id);
+            continue;
+          }
+
+          // (c) No exact match, no assignment yet. If there's open stock
+          // for this model/location at all, this is very likely a unit
+          // that was purchased before serial tracking existed in the app —
+          // ask which purchase it came from instead of failing outright.
+          const totalAvailable = lots.reduce(
+            (s, l) => s + availableInLot(l),
+            0,
+          );
+          if (totalAvailable > 0) {
+            needsAssignment.push({
+              model: item.model,
+              location,
+              serial,
+              candidateLots: lots
+                .filter((l) => availableInLot(l) > 0)
+                .map((l) => ({
+                  lot_id: l.lot_id,
+                  date: l.date,
+                  vendor: l.vendor,
+                  po_invoice: l.po_invoice,
+                  remaining_qty: availableInLot(l),
+                })),
+            });
+          } else {
             shortages.push(
-              `${item.model}: serial "${serial}" not found in available ${location} stock ` +
-                `(already sold, belongs to a different model, or never recorded at purchase)`,
+              `${item.model}: no purchase record found for serial "${serial}" — and there is no stock at all for this model in ${location}. Please record a Purchase for this item before dispatching.`,
             );
           }
         }
       } else {
-        const available = lots.reduce((s, l) => s + Number(l.remaining_qty), 0);
+        const available = lots.reduce((s, l) => s + availableInLot(l), 0);
         if (available < Number(item.qty)) {
+          const missing = Number(item.qty) - available;
           shortages.push(
-            `${item.model}: need ${item.qty}, only ${available} available in ${location}`,
+            `${item.model}: purchase records show only ${available} unit(s) available in ${location}, ` +
+              `but this invoice needs ${item.qty} — please record a Purchase for the missing ${missing} unit(s) before dispatching.`,
           );
+        } else {
+          // Provisionally reserve FIFO-first so any serialed lines checked
+          // afterward for the SAME model see accurate remaining availability.
+          let remaining = Number(item.qty);
+          for (const lot of lots) {
+            if (remaining <= 0) break;
+            const avail = availableInLot(lot);
+            if (avail <= 0) continue;
+            const take = Math.min(avail, remaining);
+            provisional.set(
+              lot.lot_id,
+              (provisional.get(lot.lot_id) ?? 0) + take,
+            );
+            remaining -= take;
+          }
         }
       }
     }
@@ -722,12 +762,46 @@ export async function PATCH(
       );
     }
 
+    if (needsAssignment.length > 0) {
+      return NextResponse.json(
+        {
+          needsSerialAssignment: true,
+          unmatchedSerials: needsAssignment,
+          message:
+            "Some entered serial numbers don't match any recorded purchase serial, but there IS open stock for that model — these units were likely purchased before serial tracking. Pick which purchase each one came from, then retry dispatch.",
+        },
+        { status: 409 },
+      );
+    }
+
     // 4. Consume stock for each line item.
-    //    - If serials were entered: consume EXACTLY those serialed units,
-    //      from whichever lot each serial actually lives in.
-    //    - If no serials were entered: FIFO-consume from oldest lots first,
-    //      taking whichever serials happen to be first in that lot (old
-    //      behaviour, unchanged for non-serialised lines).
+    //    - Serial-exact / assigned: consume EXACTLY that unit from
+    //      whichever lot it resolved to in step 3. If the lot actually had
+    //      this serial recorded, strip it out of the lot's list (normal
+    //      path). If it was a retroactive assignment (lot never tracked
+    //      this serial), there's nothing to strip — the permanent record
+    //      of "this serial came from this purchase" is the resulting Sale
+    //      transaction itself.
+    //    - No serials entered: FIFO-consume from oldest lots first, taking
+    //      whichever serials happen to be first in that lot (unchanged).
+    //
+    // Txn IDs are reserved as a contiguous block ONCE here, then handed out
+    // locally as we go. Querying the DB fresh per line item would keep
+    // returning the same "next" id every time, since nothing is actually
+    // inserted until the single batch insert at the end of this function —
+    // every line would collide on an identical txn_id.
+    const { data: lastTxnRow } = await supabase
+      .from("transactions")
+      .select("txn_id")
+      .like("txn_id", "TXN-%")
+      .order("txn_id", { ascending: false })
+      .limit(1);
+    let nextTxnNum =
+      (parseInt(
+        (lastTxnRow?.[0]?.txn_id ?? "TXN-0000").replace("TXN-", ""),
+        10,
+      ) || 0) + 1;
+
     const lotUpdates: Array<{
       lot_id: string;
       remaining_qty: number;
@@ -779,21 +853,22 @@ export async function PATCH(
       };
 
       if (enteredSerials.length > 0) {
-        // ── Serial-exact dispatch ──
         for (const serial of enteredSerials) {
-          for (const lot of lots) {
-            const live = getLive(lot);
-            if (live.remaining > 0 && live.serials.includes(serial)) {
-              applyUpdate(
-                lot,
-                live.remaining - 1,
-                live.serials.filter((s) => s !== serial),
-              );
-              costTotal += Number(lot.unit_purchase_price ?? 0);
-              consumedSerials.push(serial);
-              break;
-            }
-          }
+          const lotId = resolvedSerialLot.get(serial);
+          const lot = lots.find((l) => l.lot_id === lotId);
+          if (!lot) continue; // pre-flight already validated every serial
+
+          const live = getLive(lot);
+          const hadSerialRecorded = live.serials.includes(serial);
+          applyUpdate(
+            lot,
+            live.remaining - 1,
+            hadSerialRecorded
+              ? live.serials.filter((s) => s !== serial)
+              : live.serials, // retroactive assignment — nothing to strip
+          );
+          costTotal += Number(lot.unit_purchase_price ?? 0);
+          consumedSerials.push(serial);
         }
       } else {
         // ── Plain FIFO (oldest lot first) ──
@@ -814,7 +889,7 @@ export async function PATCH(
         }
       }
 
-      const txnId = await getNextTxnId(supabase);
+      const txnId = `TXN-${String(nextTxnNum++).padStart(4, "0")}`;
       saleTxns.push({
         txn_id: txnId,
         date: dispatchedAt,
@@ -839,15 +914,27 @@ export async function PATCH(
       });
 
       // Line item now carries the REAL serials that were actually
-      // dispatched (identical to what was typed, when serials were given —
-      // or the FIFO-picked ones, when they weren't).
+      // dispatched.
       updatedLineItems.push({
         ...item,
         serialNumbers: consumedSerials,
       });
     }
 
-    // 5. Apply all lot updates (remaining_qty AND serial_numbers)
+    // 5. Insert all Sale transactions FIRST. If this fails for any reason
+    //    (id collision, constraint violation, etc.), we bail out before
+    //    touching a single lot — Supabase's JS client has no cross-call
+    //    transaction, so whichever write happens second is the one that's
+    //    "safe" to fail on. A single multi-row INSERT is atomic in
+    //    Postgres, so either all sale rows land or none do.
+    const { error: txnInsertErr } = await supabase
+      .from("transactions")
+      .insert(saleTxns);
+    if (txnInsertErr) throw txnInsertErr;
+
+    // 6. Only now apply lot updates (remaining_qty AND serial_numbers) —
+    //    the sales are already safely recorded, so stock consumption
+    //    reflects reality even if an individual lot update below hiccups.
     for (const u of lotUpdates) {
       const { error } = await supabase
         .from("lots")
@@ -859,13 +946,51 @@ export async function PATCH(
       if (error) throw error;
     }
 
-    // 6. Insert all Sale transactions
-    const { error: txnInsertErr } = await supabase
-      .from("transactions")
-      .insert(saleTxns);
-    if (txnInsertErr) throw txnInsertErr;
+    // 7. Backfill the ORIGINAL PURCHASE transaction for any retroactively
+    //    assigned serials — this is the actual point of asking "which
+    //    purchase did this come from": both the sale AND the purchase
+    //    record should end up knowing this serial, not just the sale.
+    //    (The lot itself is intentionally left alone — it tracks CURRENT
+    //    availability, and these units already left stock in step 6.)
+    if (retroactiveAssignments.size > 0) {
+      const serialsByLot = new Map<string, string[]>();
+      for (const [serial, lotId] of retroactiveAssignments) {
+        if (!serialsByLot.has(lotId)) serialsByLot.set(lotId, []);
+        serialsByLot.get(lotId)!.push(serial);
+      }
 
-    // 7. Mark invoice dispatched AND overwrite line_items with real serials
+      for (const [lotId, newSerials] of serialsByLot) {
+        const lot = (allLots ?? []).find((l) => l.lot_id === lotId);
+        if (!lot) continue;
+
+        // Same join used to identify "the purchase behind this lot" —
+        // one purchase (transaction + lot) is created together per POST
+        // to /api/purchases, matched on model+location+date+po_invoice.
+        const { data: purchaseTxns } = await supabase
+          .from("transactions")
+          .select("id, txn_id, serial_numbers")
+          .eq("type", "Purchase")
+          .eq("model", lot.model)
+          .eq("location", location)
+          .eq("date", lot.date)
+          .eq("po_invoice", lot.po_invoice ?? "");
+
+        const purchaseTxn = (purchaseTxns ?? [])[0];
+        if (!purchaseTxn) continue; // no matching purchase row — nothing to backfill
+
+        const existing: string[] = Array.isArray(purchaseTxn.serial_numbers)
+          ? purchaseTxn.serial_numbers.filter(Boolean)
+          : [];
+        const merged = Array.from(new Set([...existing, ...newSerials]));
+
+        await supabase
+          .from("transactions")
+          .update({ serial_numbers: merged })
+          .eq("txn_id", purchaseTxn.txn_id);
+      }
+    }
+
+    // 8. Mark invoice dispatched AND overwrite line_items with real serials
     const { error: updateInvErr } = await supabase
       .from("sale_invoices")
       .update({
@@ -890,7 +1015,13 @@ export async function PATCH(
       ),
     });
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : "Unknown error";
+    console.error("[dispatch] failed:", err);
+    const message =
+      err instanceof Error
+        ? err.message
+        : typeof err === "object" && err && "message" in err
+          ? String((err as any).message)
+          : "Unknown error";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
@@ -1632,6 +1763,7 @@ export async function GET() {
       poOrInvoice: r.po_invoice,
       status: r.status,
       costPrice: r.cost_price ?? null,
+      serialNumbers: Array.isArray(r.serial_numbers) ? r.serial_numbers : [],
     }));
 
     return NextResponse.json({ purchases });
@@ -1728,6 +1860,7 @@ export async function POST(req: Request) {
       po_invoice: poOrInvoice ?? "",
       status: status ?? "Received",
       cost_price: resolvedUnitPrice,
+      serial_numbers: resolvedSerials,
     });
     if (txnErr) throw txnErr;
 
@@ -1809,7 +1942,8 @@ export async function GET() {
 
     if (error) throw error;
 
-    // Normalise to camelCase so Transactions.tsx / Dashboard.tsx don't need changes
+    // Normalise to camelCase so Transactions.tsx / Dashboard.tsx / Ledger.tsx
+    // don't need changes to their existing fields.
     const sales = (data ?? []).map((r: any) => ({
       txnId: r.txn_id,
       date: r.date,
@@ -1824,6 +1958,7 @@ export async function GET() {
       poOrInvoice: r.po_invoice,
       status: r.status,
       costPrice: r.cost_price ?? null,
+      serialNumbers: Array.isArray(r.serial_numbers) ? r.serial_numbers : [],
     }));
 
     return NextResponse.json({ sales });
@@ -8709,6 +8844,123 @@ interface Props {
   onClose: () => void;
 }
 
+// ─── Generic "did you mean" matching (same logic as RecordSale.tsx) ───────
+// No hardcoded aliases — finds the closest existing catalogue model(s) to
+// whatever the scanner extracted, so any naming mismatch (renamed SKU,
+// OCR slip, bare/ambiguous name that got split into -01/-02 variants,
+// etc.) gets a helpful nudge instead of a silent "not in catalogue".
+
+// Levenshtein distance — small, no dependency needed for product-name-length strings.
+function levenshtein(a: string, b: string): number {
+  const m = a.length,
+    n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, (_, i) =>
+    Array(n + 1)
+      .fill(0)
+      .map((_, j) => (i === 0 ? j : 0)),
+  );
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] =
+        a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Normalises for comparison: lowercase, collapse whitespace/punctuation
+// so "15B Max", "15B-MAX", "15b  max" etc. all compare the same way.
+function normForMatch(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\-_/()+]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Returns the catalogue product(s) most likely to be what was meant,
+// or [] if nothing is close enough to be worth suggesting.
+function findSimilarProducts(products: any[], typed: string, max = 2): any[] {
+  const query = normForMatch(typed);
+  if (!query) return [];
+
+  const scored = products.map((p) => {
+    const cand = normForMatch(p.model);
+    let score: number;
+
+    // Exact normalized match (only punctuation/case differed) — near-perfect.
+    if (cand === query) {
+      score = 0;
+    } else if (cand.startsWith(query) || query.startsWith(cand)) {
+      // Prefix / substring relationship (e.g. "15B Max" -> "15B Max-01 (TL75)")
+      // is a very strong signal — Fluke's "-01 default variant" pattern.
+      score = 0.5;
+    } else if (cand.includes(query) || query.includes(cand)) {
+      score = 1;
+    } else {
+      // Otherwise fall back to edit distance, normalised by length so short
+      // and long model names are comparable.
+      const dist = levenshtein(query, cand);
+      const normalizedDist = dist / Math.max(query.length, cand.length);
+      score = 2 + normalizedDist; // offset so substring matches always rank above
+    }
+
+    // Tie-breaking nudge: when a bare/ambiguous name (e.g. "15B Max") could
+    // mean either a numbered variant ("-01 (TL75)") or a bundled accessory
+    // set ("... Kit"), the numbered variant is the actual default SKU and
+    // should be suggested first. Small enough to only matter within the
+    // same score tier, never enough to override a genuinely closer match.
+    if (/\bkit\b|\bcombo\b|\bset\b/.test(cand)) score += 0.05;
+    if (/-0\d\b|\b0\d\b/.test(cand)) score -= 0.05;
+
+    return { p, score };
+  });
+
+  return scored
+    .filter((s) => s.score <= 2.35) // cutoff — tune if it feels too loose/strict
+    .sort((a, b) => a.score - b.score)
+    .slice(0, max)
+    .map((s) => s.p);
+}
+
+// ─── Serial-number-embedded-in-description recovery ────────────────────────
+// The AI model is told to split serials into their own field, but sometimes
+// lumps them into the description instead, e.g.:
+//   "Phase Rotation Indicator S/N :72830364WS"
+// This regex catches "S/N", "S no", "S.No" etc. with any spacing/colon
+// placement, and pulls the trailing serial(s) out into serialNumbers.
+const SERIAL_SUFFIX_RE =
+  /S\s*[\/.]?\s*(?:no\.?|n)\.?\s*:?\s*([A-Za-z0-9,&\s]+)$/i;
+
+function extractSerialFromDescription(
+  description: string,
+  existingSerials: string,
+): { description: string; serialNumbers: string } {
+  // Already has serials (from the model or Zoho's own JSON) — leave as-is.
+  if (existingSerials && existingSerials.trim()) {
+    return { description, serialNumbers: existingSerials };
+  }
+  const match = description.match(SERIAL_SUFFIX_RE);
+  if (!match || match.index === undefined) {
+    return { description, serialNumbers: existingSerials };
+  }
+  const extracted = match[1]
+    .split(/[,&]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(", ");
+  if (!extracted) return { description, serialNumbers: existingSerials };
+  const cleanedDescription = description.slice(0, match.index).trim();
+  return { description: cleanedDescription, serialNumbers: extracted };
+}
+
 export default function GroqSaleScanner({
   products,
   onExtracted,
@@ -8766,19 +9018,25 @@ export default function GroqSaleScanner({
       // warnings, since there's no OCR uncertainty involved.
       if (data.matchedInvoice) {
         const inv = data.matchedInvoice;
-        const lineItems = (inv.lineItems ?? []).map((li: any) => ({
-          model: li.model ?? "",
-          description: li.description ?? "",
-          hsn: li.hsn ?? "",
-          itemCode: li.itemCode ?? "",
-          qty: Number(li.qty) || 1,
-          unitPrice: Number(li.unitPrice) || 0,
-          discount: Number(li.discount) || 0,
-          total:
-            Number(li.total) ||
-            (Number(li.unitPrice) || 0) * (Number(li.qty) || 1),
-          serialNumbers: li.serialNumbers ?? "",
-        }));
+        const lineItems = (inv.lineItems ?? []).map((li: any) => {
+          const { description, serialNumbers } = extractSerialFromDescription(
+            li.description ?? "",
+            String(li.serialNumbers ?? ""),
+          );
+          return {
+            model: li.model ?? "",
+            description,
+            hsn: li.hsn ?? "",
+            itemCode: li.itemCode ?? "",
+            qty: Number(li.qty) || 1,
+            unitPrice: Number(li.unitPrice) || 0,
+            discount: Number(li.discount) || 0,
+            total:
+              Number(li.total) ||
+              (Number(li.unitPrice) || 0) * (Number(li.qty) || 1),
+            serialNumbers,
+          };
+        });
 
         setExtracted({
           invoiceNumber: inv.invoiceNumber ?? "",
@@ -9030,19 +9288,25 @@ Rules:
       }
 
       if (!Array.isArray(parsed.lineItems)) parsed.lineItems = [];
-      parsed.lineItems = parsed.lineItems.map((item: any) => ({
-        model: item.model ?? "",
-        description: item.description ?? "",
-        hsn: item.hsn ?? "",
-        itemCode: String(item.itemCode ?? "").trim(),
-        qty: Number(item.qty) || 1,
-        unitPrice: Number(item.unitPrice) || 0,
-        discount: Number(item.discount) || 0,
-        total:
-          Number(item.total) ||
-          (Number(item.unitPrice) || 0) * (Number(item.qty) || 1),
-        serialNumbers: String(item.serialNumbers ?? ""),
-      }));
+      parsed.lineItems = parsed.lineItems.map((item: any) => {
+        const { description, serialNumbers } = extractSerialFromDescription(
+          item.description ?? "",
+          String(item.serialNumbers ?? ""),
+        );
+        return {
+          model: item.model ?? "",
+          description,
+          hsn: item.hsn ?? "",
+          itemCode: String(item.itemCode ?? "").trim(),
+          qty: Number(item.qty) || 1,
+          unitPrice: Number(item.unitPrice) || 0,
+          discount: Number(item.discount) || 0,
+          total:
+            Number(item.total) ||
+            (Number(item.unitPrice) || 0) * (Number(item.qty) || 1),
+          serialNumbers,
+        };
+      });
       parsed.subtotal = Number(parsed.subtotal) || 0;
       parsed.gstRate = Number(parsed.gstRate) || 18;
       parsed.gstAmount = Number(parsed.gstAmount) || 0;
@@ -9699,18 +9963,23 @@ Rules:
                         {(extracted.lineItems as ExtractedLineItem[]).map(
                           (item, i) => {
                             const unmatched =
-                              item.model &&
+                              !!item.model?.trim() &&
                               !products.find(
                                 (p) =>
-                                  p.model.toLowerCase() ===
-                                  item.model.toLowerCase(),
+                                  String(p.model ?? "")
+                                    .trim()
+                                    .toLowerCase() ===
+                                  item.model.trim().toLowerCase(),
                               );
+                            const suggestions = unmatched
+                              ? findSimilarProducts(products, item.model)
+                              : [];
                             return (
                               <tr
                                 key={i}
                                 style={{
                                   background: unmatched
-                                    ? "rgba(245,158,11,0.04)"
+                                    ? "rgba(245,158,11,0.06)"
                                     : "transparent",
                                 }}
                               >
@@ -9726,10 +9995,70 @@ Rules:
                                       fontSize: 12,
                                       fontWeight: 500,
                                       borderColor: unmatched
-                                        ? "rgba(245,158,11,0.5)"
+                                        ? "rgba(245,158,11,0.8)"
+                                        : undefined,
+                                      background: unmatched
+                                        ? "rgba(245,158,11,0.08)"
                                         : undefined,
                                     }}
                                   />
+                                  {unmatched && (
+                                    <div
+                                      style={{
+                                        fontSize: 10,
+                                        marginTop: 3,
+                                        color: "var(--accent-amber)",
+                                        lineHeight: 1.5,
+                                      }}
+                                    >
+                                      {suggestions.length > 0 ? (
+                                        <>
+                                          not found — did you mean{" "}
+                                          {suggestions.map((s, si) => (
+                                            <span key={s.model}>
+                                              <button
+                                                onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  updateItem(
+                                                    i,
+                                                    "model",
+                                                    s.model,
+                                                  );
+                                                  updateItem(
+                                                    i,
+                                                    "hsn",
+                                                    s.hsn ?? "",
+                                                  );
+                                                  updateItem(
+                                                    i,
+                                                    "itemCode",
+                                                    s.itemCode ?? "",
+                                                  );
+                                                }}
+                                                style={{
+                                                  background: "none",
+                                                  border: "none",
+                                                  padding: 0,
+                                                  color: "var(--accent-amber)",
+                                                  textDecoration: "underline",
+                                                  fontWeight: 700,
+                                                  cursor: "pointer",
+                                                  fontSize: 10,
+                                                }}
+                                              >
+                                                {s.model}
+                                              </button>
+                                              {si < suggestions.length - 1
+                                                ? " or "
+                                                : "?"}
+                                            </span>
+                                          ))}
+                                        </>
+                                      ) : (
+                                        "⚠ no close match in catalogue"
+                                      )}
+                                    </div>
+                                  )}
                                 </td>
                                 <td>
                                   <input
@@ -9863,9 +10192,12 @@ Rules:
 
                 {extracted.lineItems.some(
                   (item: any) =>
-                    item.model &&
+                    item.model?.trim() &&
                     !products.find(
-                      (p) => p.model.toLowerCase() === item.model.toLowerCase(),
+                      (p) =>
+                        String(p.model ?? "")
+                          .trim()
+                          .toLowerCase() === item.model.trim().toLowerCase(),
                     ),
                 ) && (
                   <div
@@ -9880,7 +10212,8 @@ Rules:
                     }}
                   >
                     ⚠ Highlighted models don't exactly match your catalogue —
-                    fix them above before confirming.
+                    click a suggestion above or fix them manually before
+                    confirming.
                   </div>
                 )}
               </div>
@@ -10626,6 +10959,1131 @@ export default function InvoiceImport({
             </div>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: ./src/components/InvoicePaper.tsx
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"use client";
+// src/components/InvoicePaper.tsx
+//
+// Shared, presentational-only component: renders one invoice as a
+// pixel-close replica of TMCI's actual printed invoice (matches the real
+// Zoho Books PDF export). Used by BOTH the standalone InvoicePreview.tsx
+// browse screen AND embedded directly inside the operational
+// Invoices.tsx detail panel — one layout, one place to fix, used
+// everywhere it's shown.
+
+interface LineItem {
+  model: string;
+  itemCode: string;
+  hsn: string;
+  description: string;
+  qty: number;
+  unitSalePrice: number;
+  discount: number;
+  serialNumbers: string[];
+  warranty: string;
+}
+
+export interface InvoicePaperData {
+  invoice_number: string;
+  invoice_date: string;
+  due_date: string;
+  customer_snapshot: any;
+  line_items: LineItem[];
+  subtotal: number;
+  gst_rate: number;
+  gst_amount: number;
+  total: number;
+  notes: string | null;
+}
+
+const COMPANY = {
+  name: "TMCI Technology Private Limited",
+  companyId: "U52335KA2012PTC067266",
+  addressLines: [
+    "39/2475-B1, Suite I9, LR Towers, SJRRA 104,",
+    "South Janatha Road, Palarivattom,",
+    "Kochi Kerala 682025",
+    "India",
+  ],
+  phone: "9591119333",
+  email: "satheesh@tazkmazter.com",
+  website: "www.tazkmazter.com",
+  gstin: "32AAECT4944P1ZW",
+  gstState: "Kerala (32)",
+  bank: {
+    name: "STATE BANK OF INDIA",
+    account: "67299135280",
+    branch: "PPB INDIRANAGAR, BANGALORE",
+    ifsc: "SBIN0070679",
+  },
+};
+
+const fmtDateDMY = (raw: string) => {
+  if (!raw) return "—";
+  const d = new Date(String(raw).split("T")[0]);
+  if (isNaN(d.getTime())) return raw;
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}-${d.getFullYear()}`;
+};
+
+const fmt2 = (n: number) =>
+  Number(n || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+const ONES = [
+  "",
+  "One",
+  "Two",
+  "Three",
+  "Four",
+  "Five",
+  "Six",
+  "Seven",
+  "Eight",
+  "Nine",
+  "Ten",
+  "Eleven",
+  "Twelve",
+  "Thirteen",
+  "Fourteen",
+  "Fifteen",
+  "Sixteen",
+  "Seventeen",
+  "Eighteen",
+  "Nineteen",
+];
+const TENS = [
+  "",
+  "",
+  "Twenty",
+  "Thirty",
+  "Forty",
+  "Fifty",
+  "Sixty",
+  "Seventy",
+  "Eighty",
+  "Ninety",
+];
+
+function twoDigitsToWords(n: number): string {
+  if (n < 20) return ONES[n];
+  const t = Math.floor(n / 10);
+  const o = n % 10;
+  // Hyphenated like the actual invoice text: "Sixty-One", "Ninety-Two"
+  return TENS[t] + (o ? "-" + ONES[o] : "");
+}
+
+function threeDigitsToWords(n: number): string {
+  const h = Math.floor(n / 100);
+  const rest = n % 100;
+  let out = "";
+  if (h) out += ONES[h] + " Hundred";
+  if (rest) out += (h ? " " : "") + twoDigitsToWords(rest);
+  return out;
+}
+
+function integerToWordsIndian(n: number): string {
+  if (n === 0) return "Zero";
+  const crore = Math.floor(n / 10000000);
+  n %= 10000000;
+  const lakh = Math.floor(n / 100000);
+  n %= 100000;
+  const thousand = Math.floor(n / 1000);
+  n %= 1000;
+  const hundred = n;
+
+  const parts: string[] = [];
+  if (crore) parts.push(threeDigitsToWords(crore) + " Crore");
+  if (lakh) parts.push(threeDigitsToWords(lakh) + " Lakh");
+  if (thousand) parts.push(threeDigitsToWords(thousand) + " Thousand");
+  if (hundred) parts.push(threeDigitsToWords(hundred));
+  return parts.join(" ");
+}
+
+function amountInWords(total: number): string {
+  const rupees = Math.floor(total);
+  const paise = Math.round((total - rupees) * 100);
+  const rupeeWords = integerToWordsIndian(rupees);
+  if (paise > 0) {
+    const paiseWords = twoDigitsToWords(paise) || integerToWordsIndian(paise);
+    return `Indian Rupee ${rupeeWords} and ${paiseWords} Paise Only`;
+  }
+  return `Indian Rupee ${rupeeWords} Only`;
+}
+
+function isIntraStateKerala(customer: any): boolean {
+  const state = String(
+    customer?.billing_state || customer?.state || "",
+  ).toLowerCase();
+  return state.includes("kerala");
+}
+
+export default function InvoicePaper({
+  invoice,
+}: {
+  invoice: InvoicePaperData;
+}) {
+  const intraState = isIntraStateKerala(invoice.customer_snapshot);
+  const halfRate = (invoice.gst_rate ?? 18) / 2;
+  const customer = invoice.customer_snapshot;
+  const billTo = customer
+    ? [
+        customer.billing_address || customer.address,
+        customer.billing_city || customer.city,
+        customer.billing_state || customer.state,
+        customer.billing_pincode || customer.pincode,
+      ]
+        .filter(Boolean)
+        .join(", ")
+    : "";
+
+  return (
+    <div className="ip-paper">
+      <style>{`
+        /* NOTE: every rule below uses !important because the app's global
+           dark-theme styles (table, th, td, backgrounds, text colors) bleed
+           into this component otherwise — the paper must stay white with
+           dark text regardless of the surrounding theme. */
+        .ip-paper {
+          background: #ffffff !important; color: #1a1a1a !important;
+          width: 100%; max-width: 860px; margin: 0 auto;
+          font-family: Arial, Helvetica, sans-serif;
+          padding: 34px 40px;
+          font-size: 12.5px;
+          line-height: 1.5;
+        }
+        .ip-paper * { color: #1a1a1a; }
+        .ip-inner { border: 1.5px solid #333; }
+        .ip-header-block { display: flex; justify-content: space-between; align-items: flex-start; padding: 14px 16px; }
+        .ip-meta-block {
+          display: grid; grid-template-columns: 55% 45%;
+          border-top: 1.5px solid #333; border-bottom: 1.5px solid #333;
+        }
+        .ip-meta-left { padding: 8px 12px; }
+        .ip-meta-right { padding: 8px 12px; border-left: 1.5px solid #333; }
+        .ip-meta-row { display: flex; font-size: 12.5px; padding: 1.5px 0; }
+        .ip-meta-row .k { width: 120px; flex-shrink: 0; }
+        .ip-meta-row .v { font-weight: 700; }
+        .ip-section { padding: 10px 16px; }
+        .ip-hr { border: none; border-top: 1.5px solid #333; margin: 14px 0; }
+        .ip-meta-table { border-collapse: collapse !important; width: 100% !important; }
+        .ip-meta-table td {
+          border: none !important; padding: 2px 0 !important;
+          font-size: 12.5px !important; vertical-align: top !important;
+          background: transparent !important; color: #1a1a1a !important;
+        }
+        .ip-meta-label { font-weight: 700; width: 130px; }
+        .ip-billship {
+          display: grid; grid-template-columns: 1fr 1fr;
+          border: 1px solid #333;
+        }
+        .ip-billship-col { padding: 8px 12px; }
+        .ip-billship-col + .ip-billship-col { border-left: 1px solid #333; }
+        .ip-billship-label {
+          font-weight: 700; font-size: 12px; background: #f2f2f2 !important;
+          margin: -8px -12px 8px -12px; padding: 6px 12px;
+          border-bottom: 1px solid #333;
+        }
+        .ip-items-table { border-collapse: collapse !important; width: 100% !important; }
+        .ip-items-table th, .ip-items-table td {
+          border: 1px solid #333 !important; padding: 6px 8px !important;
+          font-size: 12px !important; vertical-align: top !important;
+          color: #1a1a1a !important;
+        }
+        .ip-items-table th {
+          font-weight: 700 !important; text-align: left !important;
+          background: #ffffff !important;
+          text-transform: none !important; letter-spacing: 0 !important;
+        }
+        .ip-items-table td { background: #ffffff !important; }
+        .ip-items-table tbody tr:hover td { background: #ffffff !important; }
+        .ip-totals-table { border-collapse: collapse !important; width: 100% !important; }
+        .ip-totals-table td {
+          border: none !important; padding: 3px 0 !important;
+          font-size: 12.5px !important; background: transparent !important;
+          color: #1a1a1a !important;
+        }
+        .ip-totals-table tr.ip-total-row td {
+          border-top: 1.5px solid #333 !important; padding-top: 6px !important;
+          font-weight: 700 !important; font-size: 13.5px !important;
+        }
+      `}</style>
+
+      <div className="ip-inner">
+        {/* Header */}
+        <div className="ip-header-block">
+          <div style={{ display: "flex", gap: 14 }}>
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: "50%",
+                border: "3px solid #1a2a6c",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontWeight: 700,
+                fontSize: 11,
+                color: "#1a2a6c",
+                flexShrink: 0,
+              }}
+            >
+              TMCI
+            </div>
+            <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
+                {COMPANY.name}
+              </div>
+              <div>Company ID : {COMPANY.companyId}</div>
+              {COMPANY.addressLines.map((l, i) => (
+                <div key={i}>{l}</div>
+              ))}
+              <div>{COMPANY.phone}</div>
+              <div>{COMPANY.email}</div>
+              <div>{COMPANY.website}</div>
+              <div>GSTIN: {COMPANY.gstin}</div>
+            </div>
+          </div>
+          <div
+            style={{
+              fontSize: 28,
+              fontWeight: 700,
+              letterSpacing: "0.05em",
+              color: "#1a1a1a",
+            }}
+          >
+            INVOICE
+          </div>
+        </div>
+
+        {/* Invoice meta — bordered two-pane row exactly like the PDF:
+          left pane has the invoice fields with BOLD values, right pane has
+          Place Of Supply. */}
+        <div className="ip-meta-block">
+          <div className="ip-meta-left">
+            <div className="ip-meta-row">
+              <span className="k">Invoice Number</span>
+              <span className="v">: {invoice.invoice_number}</span>
+            </div>
+            <div className="ip-meta-row">
+              <span className="k">Invoice Date</span>
+              <span className="v">: {fmtDateDMY(invoice.invoice_date)}</span>
+            </div>
+            <div className="ip-meta-row">
+              <span className="k">Terms</span>
+              <span className="v">: Due on Receipt</span>
+            </div>
+            <div className="ip-meta-row">
+              <span className="k">Due Date</span>
+              <span className="v">: {fmtDateDMY(invoice.due_date)}</span>
+            </div>
+            {(invoice as any).po_number && (
+              <div className="ip-meta-row">
+                <span className="k">P.O. Number</span>
+                <span className="v">: {(invoice as any).po_number}</span>
+              </div>
+            )}
+          </div>
+          <div className="ip-meta-right">
+            <div className="ip-meta-row">
+              <span className="k">Place Of Supply</span>
+              <span className="v">: {COMPANY.gstState}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Bill To / Ship To */}
+        <div
+          className="ip-billship"
+          style={{ border: "none", borderBottom: "1.5px solid #333" }}
+        >
+          <div className="ip-billship-col">
+            <div className="ip-billship-label">Bill To</div>
+            <div style={{ fontWeight: 700, color: "#1a4fa0" }}>
+              {customer?.display_name || customer?.name}
+            </div>
+            <div>{billTo}</div>
+            <div>India</div>
+            {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+          </div>
+          <div className="ip-billship-col">
+            <div className="ip-billship-label">Ship To</div>
+            <div style={{ fontWeight: 700 }}>
+              {customer?.display_name || customer?.name}
+            </div>
+            <div>{billTo}</div>
+            <div>India</div>
+            {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+          </div>
+        </div>
+
+        {/* Subject */}
+        <div className="ip-section">
+          {invoice.notes && (
+            <div style={{ fontSize: 12, marginBottom: 12 }}>
+              Subject :
+              <br />
+              {invoice.notes}
+            </div>
+          )}
+
+          {/* Line items */}
+          <table className="ip-items-table">
+            <thead>
+              <tr>
+                <th style={{ width: 34 }}>S.No</th>
+                <th>Item &amp; Description</th>
+                <th style={{ width: 80 }}>HSN / SAC</th>
+                <th style={{ width: 50, textAlign: "right" }}>Qty</th>
+                <th style={{ width: 80, textAlign: "right" }}>Rate</th>
+                {intraState ? (
+                  <>
+                    <th style={{ width: 80, textAlign: "right" }}>CGST</th>
+                    <th style={{ width: 80, textAlign: "right" }}>SGST</th>
+                  </>
+                ) : (
+                  <th style={{ width: 90, textAlign: "right" }}>IGST</th>
+                )}
+                <th style={{ width: 90, textAlign: "right" }}>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invoice.line_items.map((l, i) => {
+                const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
+                const lineAmount = eff * l.qty;
+                const lineTax = (lineAmount * invoice.gst_rate) / 100;
+                const half = lineTax / 2;
+                return (
+                  <tr key={i}>
+                    <td>{i + 1}</td>
+                    <td>
+                      <div>
+                        {/^fluke/i.test(l.model) ? l.model : `Fluke ${l.model}`}
+                      </div>
+                      {l.description && <div>{l.description}</div>}
+                      {(l.serialNumbers?.filter(Boolean).length ?? 0) > 0 && (
+                        <div>
+                          S/N: {l.serialNumbers.filter(Boolean).join(" & ")}
+                        </div>
+                      )}
+                    </td>
+                    <td>{l.hsn || "—"}</td>{" "}
+                    <td style={{ textAlign: "right" }}>
+                      {l.qty.toFixed(2)}
+                      <br />
+                      pcs
+                    </td>
+                    <td style={{ textAlign: "right" }}>{fmt2(eff)}</td>
+                    {intraState ? (
+                      <>
+                        <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                        <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                      </>
+                    ) : (
+                      <td style={{ textAlign: "right" }}>{fmt2(lineTax)}</td>
+                    )}
+                    <td style={{ textAlign: "right" }}>{fmt2(lineAmount)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+
+          {/* Totals + amount in words + bank details */}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: 16,
+              gap: 20,
+            }}
+          >
+            <div style={{ fontSize: 12, flex: 1 }}>
+              <div style={{ marginBottom: 10 }}>
+                <strong>Total In Words</strong>
+                <br />
+                <em>{amountInWords(invoice.total)}</em>
+              </div>
+              <div>Bank Name: {COMPANY.bank.name}</div>
+              <div>Account Number: {COMPANY.bank.account}</div>
+              <div>Branch Name: {COMPANY.bank.branch}</div>
+              <div>IFSC Code: {COMPANY.bank.ifsc}</div>
+            </div>
+
+            <div style={{ width: 260, fontSize: 12 }}>
+              <table className="ip-totals-table">
+                <tbody>
+                  <tr>
+                    <td>Sub Total</td>
+                    <td style={{ textAlign: "right" }}>
+                      {fmt2(invoice.subtotal)}
+                    </td>
+                  </tr>
+                  {intraState ? (
+                    <>
+                      <tr>
+                        <td>
+                          CGST{halfRate} ({halfRate}%)
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {fmt2(invoice.gst_amount / 2)}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>
+                          SGST{halfRate} ({halfRate}%)
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {fmt2(invoice.gst_amount / 2)}
+                        </td>
+                      </tr>
+                    </>
+                  ) : (
+                    <tr>
+                      <td>IGST ({invoice.gst_rate}%)</td>
+                      <td style={{ textAlign: "right" }}>
+                        {fmt2(invoice.gst_amount)}
+                      </td>
+                    </tr>
+                  )}
+                  <tr className="ip-total-row">
+                    <td>Total</td>
+                    <td style={{ textAlign: "right" }}>
+                      Rs.{fmt2(invoice.total)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div
+                style={{
+                  marginTop: 60,
+                  borderTop: "1px solid #1a1a1a",
+                  paddingTop: 4,
+                  textAlign: "center",
+                  fontSize: 11,
+                }}
+              >
+                Authorized Signatory
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE: ./src/components/InvoicePreview.tsx
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"use client";
+// src/components/InvoicePreview.tsx
+//
+// A dedicated "print preview" screen: searchable invoice list on the left,
+// a pixel-close replica of TMCI's actual printed invoice layout on the
+// right (matches the Zoho Books PDF export exactly — letterhead, Bill
+// To/Ship To, HSN table with CGST/SGST split, amount in words, bank
+// details, signatory line).
+//
+// This is presentational only — it reads existing invoices via
+// /api/invoices and renders them in this fixed paper layout. It does not
+// replace the operational Invoices.tsx screen (search/dispatch/cancel etc).
+
+import { useState, useEffect, useMemo } from "react";
+
+interface LineItem {
+  model: string;
+  itemCode: string;
+  hsn: string;
+  description: string;
+  qty: number;
+  unitSalePrice: number;
+  discount: number;
+  serialNumbers: string[];
+  warranty: string;
+}
+
+interface Invoice {
+  id: string;
+  invoice_number: string;
+  invoice_date: string;
+  due_date: string;
+  customer_snapshot: any;
+  location: string;
+  line_items: LineItem[];
+  subtotal: number;
+  gst_rate: number;
+  gst_amount: number;
+  total: number;
+  notes: string | null;
+  status: string;
+}
+
+// ── Company letterhead constants (from the actual TMCI invoice PDF) ──────────
+const COMPANY = {
+  name: "TMCI Technology Private Limited",
+  companyId: "U52335KA2012PTC067266",
+  addressLines: [
+    "39/2475-B1, Suite I9, LR Towers, SJRRA 104,",
+    "South Janatha Road, Palarivattom,",
+    "Kochi Kerala 682025",
+    "India",
+  ],
+  phone: "9591119333",
+  email: "satheesh@tazkmazter.com",
+  website: "www.tazkmazter.com",
+  gstin: "32AAECT4944P1ZW",
+  gstState: "Kerala (32)",
+  bank: {
+    name: "STATE BANK OF INDIA",
+    account: "67299135280",
+    branch: "PPB INDIRANAGAR, BANGALORE",
+    ifsc: "SBIN0070679",
+  },
+};
+
+const fmtDateDMY = (raw: string) => {
+  if (!raw) return "—";
+  const d = new Date(String(raw).split("T")[0]);
+  if (isNaN(d.getTime())) return raw;
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}-${mm}-${d.getFullYear()}`;
+};
+
+const fmt2 = (n: number) =>
+  Number(n || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+
+// ── Indian-numbering number-to-words (Rupees / Paise) ────────────────────────
+const ONES = [
+  "",
+  "One",
+  "Two",
+  "Three",
+  "Four",
+  "Five",
+  "Six",
+  "Seven",
+  "Eight",
+  "Nine",
+  "Ten",
+  "Eleven",
+  "Twelve",
+  "Thirteen",
+  "Fourteen",
+  "Fifteen",
+  "Sixteen",
+  "Seventeen",
+  "Eighteen",
+  "Nineteen",
+];
+const TENS = [
+  "",
+  "",
+  "Twenty",
+  "Thirty",
+  "Forty",
+  "Fifty",
+  "Sixty",
+  "Seventy",
+  "Eighty",
+  "Ninety",
+];
+
+function twoDigitsToWords(n: number): string {
+  if (n < 20) return ONES[n];
+  const t = Math.floor(n / 10);
+  const o = n % 10;
+  return TENS[t] + (o ? " " + ONES[o] : "");
+}
+
+function threeDigitsToWords(n: number): string {
+  const h = Math.floor(n / 100);
+  const rest = n % 100;
+  let out = "";
+  if (h) out += ONES[h] + " Hundred";
+  if (rest) out += (h ? " " : "") + twoDigitsToWords(rest);
+  return out;
+}
+
+// Indian grouping: crore, lakh, thousand, hundred
+function integerToWordsIndian(n: number): string {
+  if (n === 0) return "Zero";
+  const crore = Math.floor(n / 10000000);
+  n %= 10000000;
+  const lakh = Math.floor(n / 100000);
+  n %= 100000;
+  const thousand = Math.floor(n / 1000);
+  n %= 1000;
+  const hundred = n;
+
+  const parts: string[] = [];
+  if (crore) parts.push(threeDigitsToWords(crore) + " Crore");
+  if (lakh) parts.push(threeDigitsToWords(lakh) + " Lakh");
+  if (thousand) parts.push(threeDigitsToWords(thousand) + " Thousand");
+  if (hundred) parts.push(threeDigitsToWords(hundred));
+  return parts.join(" ");
+}
+
+function amountInWords(total: number): string {
+  const rupees = Math.floor(total);
+  const paise = Math.round((total - rupees) * 100);
+  const rupeeWords = integerToWordsIndian(rupees);
+  if (paise > 0) {
+    const paiseWords = twoDigitsToWords(paise) || integerToWordsIndian(paise);
+    return `Indian Rupee ${rupeeWords} and ${paiseWords} Paise Only`;
+  }
+  return `Indian Rupee ${rupeeWords} Only`;
+}
+
+// Is this an intra-state (Kerala-to-Kerala) sale? Business is in Kerala, so
+// CGST+SGST applies within-state; otherwise it's IGST across state lines —
+// same real-world GST rule the source PDF's layout assumes.
+function isIntraStateKerala(customer: any): boolean {
+  const state = String(
+    customer?.billing_state || customer?.state || "",
+  ).toLowerCase();
+  return state.includes("kerala");
+}
+
+export default function InvoicePreview() {
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/invoices?limit=200")
+      .then((r) => r.json())
+      .then((d) => {
+        const list: Invoice[] = d.invoices ?? [];
+        setInvoices(list);
+        if (list.length > 0) setSelectedId(list[0].id);
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return invoices;
+    const q = search.toLowerCase();
+    return invoices.filter((inv) => {
+      const name =
+        inv.customer_snapshot?.display_name ||
+        inv.customer_snapshot?.name ||
+        "";
+      return (
+        inv.invoice_number.toLowerCase().includes(q) ||
+        name.toLowerCase().includes(q) ||
+        inv.line_items.some((l) => l.model?.toLowerCase().includes(q))
+      );
+    });
+  }, [invoices, search]);
+
+  const selected = invoices.find((i) => i.id === selectedId) ?? null;
+  const intraState = selected
+    ? isIntraStateKerala(selected.customer_snapshot)
+    : true;
+  const halfRate = (selected?.gst_rate ?? 18) / 2;
+
+  const customer = selected?.customer_snapshot;
+  const billTo = customer
+    ? [
+        customer.billing_address || customer.address,
+        customer.billing_city || customer.city,
+        customer.billing_state || customer.state,
+        customer.billing_pincode || customer.pincode,
+      ]
+        .filter(Boolean)
+        .join(", ")
+    : "";
+
+  return (
+    <div style={{ display: "flex", height: "100%", overflow: "hidden" }}>
+      <style>{`
+        .ip-list-item { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+        .ip-list-item:hover { background: rgba(255,255,255,0.03); }
+        .ip-list-item.active { background: rgba(59,130,246,0.08); border-left: 2px solid var(--accent); }
+        .ip-paper-scroll { flex: 1; overflow: auto; background: #3a3d45; padding: 24px; display: flex; justify-content: center; }
+        .ip-paper {
+          background: #ffffff; color: #1a1a1a; width: 900px; max-width: 100%;
+          box-shadow: 0 8px 30px rgba(0,0,0,0.4); font-family: "Times New Roman", Georgia, serif;
+          padding: 32px 36px;
+        }
+        .ip-paper table { border-collapse: collapse; width: 100%; }
+        .ip-paper th, .ip-paper td { border: 1px solid #999; padding: 6px 8px; font-size: 12px; }
+        .ip-paper th { background: #f2f2f2; font-weight: 700; text-align: left; }
+      `}</style>
+
+      {/* Left: invoice list */}
+      <div
+        style={{
+          width: 300,
+          flexShrink: 0,
+          borderRight: "1px solid var(--border)",
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          style={{
+            padding: "10px 12px",
+            borderBottom: "1px solid var(--border)",
+            flexShrink: 0,
+          }}
+        >
+          <input
+            placeholder="Search invoice #, customer, product…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            style={{ width: "100%" }}
+          />
+        </div>
+        <div style={{ flex: 1, overflowY: "auto" }}>
+          {loading ? (
+            <div
+              style={{ padding: 16, fontSize: 12, color: "var(--text-muted)" }}
+            >
+              Loading…
+            </div>
+          ) : filtered.length === 0 ? (
+            <div
+              style={{ padding: 16, fontSize: 12, color: "var(--text-muted)" }}
+            >
+              No invoices found.
+            </div>
+          ) : (
+            filtered.map((inv) => {
+              const name =
+                inv.customer_snapshot?.display_name ||
+                inv.customer_snapshot?.name ||
+                "—";
+              return (
+                <div
+                  key={inv.id}
+                  className={`ip-list-item${selectedId === inv.id ? " active" : ""}`}
+                  onClick={() => setSelectedId(inv.id)}
+                >
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>{name}</div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-muted)",
+                      marginTop: 2,
+                    }}
+                  >
+                    {inv.invoice_number} · {fmtDateDMY(inv.invoice_date)}
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: "var(--accent-green)",
+                      marginTop: 3,
+                    }}
+                  >
+                    ₹{fmt2(inv.total)}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* Right: pixel-close print-style preview */}
+      <div className="ip-paper-scroll">
+        {!selected ? (
+          <div style={{ color: "#ccc", fontSize: 13, alignSelf: "center" }}>
+            Select an invoice to preview
+          </div>
+        ) : (
+          <div className="ip-paper">
+            {/* Header */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "flex-start",
+                borderBottom: "2px solid #1a1a1a",
+                paddingBottom: 12,
+                marginBottom: 12,
+              }}
+            >
+              <div style={{ display: "flex", gap: 14 }}>
+                {/* Simple placeholder logo mark */}
+                <div
+                  style={{
+                    width: 56,
+                    height: 56,
+                    borderRadius: "50%",
+                    border: "3px solid #1a2a6c",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontWeight: 700,
+                    fontSize: 11,
+                    color: "#1a2a6c",
+                    flexShrink: 0,
+                  }}
+                >
+                  TMCI
+                </div>
+                <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+                  <div
+                    style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}
+                  >
+                    {COMPANY.name}
+                  </div>
+                  <div>Company ID : {COMPANY.companyId}</div>
+                  {COMPANY.addressLines.map((l, i) => (
+                    <div key={i}>{l}</div>
+                  ))}
+                  <div>{COMPANY.phone}</div>
+                  <div>{COMPANY.email}</div>
+                  <div>{COMPANY.website}</div>
+                  <div>GSTIN: {COMPANY.gstin}</div>
+                </div>
+              </div>
+              <div
+                style={{
+                  fontSize: 28,
+                  fontWeight: 700,
+                  letterSpacing: "0.05em",
+                  color: "#1a1a1a",
+                }}
+              >
+                INVOICE
+              </div>
+            </div>
+
+            {/* Invoice meta */}
+            <table style={{ marginBottom: 0 }}>
+              <tbody>
+                <tr>
+                  <td style={{ width: "50%" }}>
+                    <strong>Invoice Number</strong>
+                  </td>
+                  <td>: {selected.invoice_number}</td>
+                  <td style={{ width: "20%" }}>
+                    <strong>Place Of Supply</strong>
+                  </td>
+                  <td>: {COMPANY.gstState}</td>
+                </tr>
+                <tr>
+                  <td>
+                    <strong>Invoice Date</strong>
+                  </td>
+                  <td>: {fmtDateDMY(selected.invoice_date)}</td>
+                  <td />
+                  <td />
+                </tr>
+                <tr>
+                  <td>
+                    <strong>Terms</strong>
+                  </td>
+                  <td>: Due on Receipt</td>
+                  <td />
+                  <td />
+                </tr>
+                <tr>
+                  <td>
+                    <strong>Due Date</strong>
+                  </td>
+                  <td>: {fmtDateDMY(selected.due_date)}</td>
+                  <td />
+                  <td />
+                </tr>
+              </tbody>
+            </table>
+
+            {/* Bill To / Ship To */}
+            <table style={{ marginTop: 10 }}>
+              <thead>
+                <tr>
+                  <th style={{ width: "50%" }}>Bill To</th>
+                  <th>Ship To</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style={{ verticalAlign: "top" }}>
+                    <div style={{ fontWeight: 700, color: "#1a4fa0" }}>
+                      {customer?.display_name || customer?.name}
+                    </div>
+                    <div>{billTo}</div>
+                    <div>India</div>
+                    {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+                  </td>
+                  <td style={{ verticalAlign: "top" }}>
+                    <div style={{ fontWeight: 700 }}>
+                      {customer?.display_name || customer?.name}
+                    </div>
+                    <div>{billTo}</div>
+                    <div>India</div>
+                    {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            {/* Subject */}
+            {selected.notes && (
+              <div style={{ fontSize: 12, margin: "12px 0" }}>
+                <strong>Subject :</strong>
+                <br />
+                {selected.notes}
+              </div>
+            )}
+
+            {/* Line items */}
+            <table style={{ marginTop: 10 }}>
+              <thead>
+                <tr>
+                  <th style={{ width: 34 }}>S.No</th>
+                  <th>Item &amp; Description</th>
+                  <th style={{ width: 80 }}>HSN / SAC</th>
+                  <th style={{ width: 50, textAlign: "right" }}>Qty</th>
+                  <th style={{ width: 80, textAlign: "right" }}>Rate</th>
+                  {intraState ? (
+                    <>
+                      <th style={{ width: 80, textAlign: "right" }}>CGST</th>
+                      <th style={{ width: 80, textAlign: "right" }}>SGST</th>
+                    </>
+                  ) : (
+                    <th style={{ width: 90, textAlign: "right" }}>IGST</th>
+                  )}
+                  <th style={{ width: 90, textAlign: "right" }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selected.line_items.map((l, i) => {
+                  const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
+                  const lineAmount = eff * l.qty;
+                  const lineTax = (lineAmount * selected.gst_rate) / 100;
+                  const half = lineTax / 2;
+                  return (
+                    <tr key={i}>
+                      <td>{i + 1}</td>
+                      <td>
+                        <div style={{ fontWeight: 700 }}>{l.model}</div>
+                        {l.description && <div>{l.description}</div>}
+                        {l.serialNumbers?.filter(Boolean).map((sn, si) => (
+                          <div key={si}>S/N:{sn}</div>
+                        ))}
+                      </td>
+                      <td>{l.hsn}</td>
+                      <td style={{ textAlign: "right" }}>{l.qty.toFixed(2)}</td>
+                      <td style={{ textAlign: "right" }}>{fmt2(eff)}</td>
+                      {intraState ? (
+                        <>
+                          <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                          <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                        </>
+                      ) : (
+                        <td style={{ textAlign: "right" }}>{fmt2(lineTax)}</td>
+                      )}
+                      <td style={{ textAlign: "right" }}>{fmt2(lineAmount)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            {/* Totals + amount in words + bank details */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginTop: 14,
+                gap: 20,
+              }}
+            >
+              <div style={{ fontSize: 12, flex: 1 }}>
+                <div style={{ marginBottom: 10 }}>
+                  <strong>Total In Words</strong>
+                  <br />
+                  <em>{amountInWords(selected.total)}</em>
+                </div>
+                <div>Bank Name: {COMPANY.bank.name}</div>
+                <div>Account Number: {COMPANY.bank.account}</div>
+                <div>Branch Name: {COMPANY.bank.branch}</div>
+                <div>IFSC Code: {COMPANY.bank.ifsc}</div>
+              </div>
+
+              <div style={{ width: 260, fontSize: 12 }}>
+                <table>
+                  <tbody>
+                    <tr>
+                      <td>Sub Total</td>
+                      <td style={{ textAlign: "right" }}>
+                        {fmt2(selected.subtotal)}
+                      </td>
+                    </tr>
+                    {intraState ? (
+                      <>
+                        <tr>
+                          <td>
+                            CGST{halfRate.toFixed(0)} ({halfRate}%)
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            {fmt2(selected.gst_amount / 2)}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>
+                            SGST{halfRate.toFixed(0)} ({halfRate}%)
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            {fmt2(selected.gst_amount / 2)}
+                          </td>
+                        </tr>
+                      </>
+                    ) : (
+                      <tr>
+                        <td>IGST ({selected.gst_rate}%)</td>
+                        <td style={{ textAlign: "right" }}>
+                          {fmt2(selected.gst_amount)}
+                        </td>
+                      </tr>
+                    )}
+                    <tr>
+                      <td style={{ fontWeight: 700 }}>Total</td>
+                      <td style={{ textAlign: "right", fontWeight: 700 }}>
+                        Rs.{fmt2(selected.total)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div
+                  style={{
+                    marginTop: 60,
+                    borderTop: "1px solid #1a1a1a",
+                    paddingTop: 4,
+                    textAlign: "center",
+                    fontSize: 11,
+                  }}
+                >
+                  Authorized Signatory
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -11609,6 +13067,7 @@ import React from "react";
 // Left: list panel with search + sort. Right: invoice detail panel.
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import InvoicePaper from "@/components/InvoicePaper";
 
 interface LineItem {
   model: string;
@@ -11639,6 +13098,21 @@ interface Invoice {
   status: string;
   dispatched_at: string | null;
   created_at: string;
+}
+
+interface CandidateLot {
+  lot_id: string;
+  date: string;
+  vendor: string;
+  po_invoice: string;
+  remaining_qty: number;
+}
+
+interface UnmatchedSerial {
+  model: string;
+  location: string;
+  serial: string;
+  candidateLots: CandidateLot[];
 }
 
 const fmtDate = (iso: string) =>
@@ -11700,15 +13174,10 @@ function getCustomerName(inv: Invoice): string {
 
 function matchesSearch(inv: Invoice, q: string): boolean {
   const needle = q.toLowerCase();
-  // Invoice number
   if (inv.invoice_number.toLowerCase().includes(needle)) return true;
-  // Customer name
   if (getCustomerName(inv).toLowerCase().includes(needle)) return true;
-  // Customer GSTIN
   if (inv.customer_snapshot?.gstin?.toLowerCase().includes(needle)) return true;
-  // Notes / subject
   if (inv.notes?.toLowerCase().includes(needle)) return true;
-  // Any product model or description in line items
   if (
     inv.line_items.some(
       (l) =>
@@ -11718,7 +13187,6 @@ function matchesSearch(inv: Invoice, q: string): boolean {
     )
   )
     return true;
-  // Serial numbers
   if (
     inv.line_items.some((l) =>
       l.serialNumbers?.some((sn) => sn?.toLowerCase().includes(needle)),
@@ -11754,6 +13222,16 @@ function InvoiceDetail({
   const [confirmUndo, setConfirmUndo] = useState(false);
   const [error, setError] = useState("");
 
+  // ── Retroactive serial → purchase assignment wizard ───────────────────────
+  const [unmatchedSerials, setUnmatchedSerials] = useState<
+    UnmatchedSerial[] | null
+  >(null);
+  const [assignmentMessage, setAssignmentMessage] = useState("");
+  const [serialChoices, setSerialChoices] = useState<Record<string, string>>(
+    {},
+  );
+  const [assignStep, setAssignStep] = useState(0);
+
   const isPending = invoice.status === "pending_dispatch";
   const isDispatched = invoice.status === "dispatched";
   const sm = STATUS_META[invoice.status] ?? STATUS_META.pending_dispatch;
@@ -11768,17 +13246,30 @@ function InvoiceDetail({
     0,
   );
 
-  const handleDispatch = async () => {
+  const handleDispatch = async (assignments?: Record<string, string>) => {
     setDispatching(true);
     setError("");
     try {
       const r = await fetch(`/api/invoices/${invoice.id}/dispatch`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dispatched_at: dispatchDate }),
+        body: JSON.stringify({
+          dispatched_at: dispatchDate,
+          serialLotAssignments: assignments ?? serialChoices,
+        }),
       });
       const d = await r.json();
       if (!r.ok) {
+        if (d.needsSerialAssignment) {
+          setUnmatchedSerials(d.unmatchedSerials ?? []);
+          setAssignmentMessage(
+            d.message ||
+              "Some serials don't match a recorded purchase — pick which purchase each came from below.",
+          );
+          setAssignStep(0);
+          setDispatching(false);
+          return;
+        }
         setError(d.error || "Dispatch failed");
         setDispatching(false);
         return;
@@ -11850,6 +13341,11 @@ function InvoiceDetail({
     }
     setUndoing(false);
   };
+
+  const allAssigned =
+    !unmatchedSerials ||
+    unmatchedSerials.every((u) => !!serialChoices[u.serial]);
+  const wizardActive = !!(unmatchedSerials && unmatchedSerials.length > 0);
 
   return (
     <div
@@ -11950,436 +13446,493 @@ function InvoiceDetail({
           gap: 12,
         }}
       >
-        {customer && (
-          <div
-            style={{
-              background: "rgba(59,130,246,0.06)",
-              border: "1px solid rgba(59,130,246,0.2)",
-              borderRadius: 8,
-              padding: "10px 12px",
-              fontSize: 12,
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: 3 }}>
-              {customer.display_name || customer.name}
-            </div>
-            {(customer.billing_address || customer.address) && (
-              <div style={{ color: "var(--text-muted)" }}>
-                {[
-                  customer.billing_address || customer.address,
-                  customer.billing_city || customer.city,
-                  customer.billing_state || customer.state,
-                  customer.billing_pincode || customer.pincode,
-                ]
-                  .filter(Boolean)
-                  .join(", ")}
-              </div>
-            )}
+        {/* Hide the normal invoice detail while the serial-assignment
+            wizard is active — same pattern as PendingInvoices.tsx, keeps
+            the wizard as the sole focus instead of a wall of text above it. */}
+        {!wizardActive && (
+          <>
             <div
               style={{
+                background: "#ffffff",
+                borderRadius: 8,
+                padding: 20,
                 display: "flex",
-                gap: 10,
-                marginTop: 3,
-                flexWrap: "wrap",
+                justifyContent: "center",
+                overflowX: "auto",
+                overflowY: "auto",
+                maxHeight: "calc(100vh - 220px)",
               }}
             >
-              {customer.gstin && (
-                <span
+              <InvoicePaper invoice={invoice} />
+            </div>
+
+            {isPending && (
+              <div
+                style={{
+                  background: "rgba(34,197,94,0.06)",
+                  border: "1px solid rgba(34,197,94,0.25)",
+                  borderRadius: 8,
+                  padding: "12px 14px",
+                }}
+              >
+                <div
                   style={{
-                    fontFamily: "monospace",
-                    fontSize: 11,
-                    color: "var(--text-muted)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--accent-green)",
+                    marginBottom: 8,
                   }}
                 >
-                  GSTIN: {customer.gstin}
-                </span>
-              )}
-              {(customer.phone || customer.mobile) && (
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  {customer.phone || customer.mobile}
-                </span>
-              )}
-              {customer.email && (
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  {customer.email}
-                </span>
-              )}
-            </div>
-          </div>
+                  Ready to dispatch?
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    <label
+                      style={{
+                        fontSize: 10,
+                        color: "var(--text-muted)",
+                        display: "block",
+                        marginBottom: 3,
+                      }}
+                    >
+                      Dispatch date
+                    </label>
+                    <input
+                      type="date"
+                      value={dispatchDate}
+                      onChange={(e) => setDispatchDate(e.target.value)}
+                      style={{ width: 160 }}
+                    />
+                  </div>
+                  <button
+                    className="btn-primary"
+                    style={{
+                      fontSize: 12,
+                      background: "var(--accent-green)",
+                      marginTop: 14,
+                    }}
+                    onClick={() => handleDispatch()}
+                    disabled={dispatching}
+                  >
+                    {dispatching ? "Dispatching..." : "Mark as dispatched"}
+                  </button>
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--accent-green)",
+                    opacity: 0.8,
+                    marginTop: 6,
+                  }}
+                >
+                  Deducts{" "}
+                  {invoice.line_items
+                    .map((l) => `${l.qty}x ${l.model}`)
+                    .join(", ")}{" "}
+                  from {invoice.location} via FIFO and logs the sale.
+                </div>
+              </div>
+            )}
+
+            {isDispatched && !confirmUndo && (
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  padding: "10px 12px",
+                  background: "rgba(245,158,11,0.06)",
+                  border: "1px solid rgba(245,158,11,0.25)",
+                  borderRadius: 8,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--text-dim)",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  This invoice is dispatched — stock has been deducted via FIFO.
+                  If it was marked dispatched by mistake, you can undo it: stock
+                  is restored and the invoice returns to Pending Dispatch.
+                </div>
+                <button
+                  className="btn-ghost"
+                  style={{
+                    fontSize: 11,
+                    color: "var(--accent-amber)",
+                    borderColor: "rgba(245,158,11,0.3)",
+                    alignSelf: "flex-start",
+                  }}
+                  onClick={() => setConfirmUndo(true)}
+                >
+                  ↺ Undo dispatch (restore stock)
+                </button>
+              </div>
+            )}
+
+            {confirmUndo && (
+              <div
+                style={{
+                  background: "rgba(245,158,11,0.07)",
+                  border: "1px solid rgba(245,158,11,0.3)",
+                  borderRadius: 8,
+                  padding: "10px 14px",
+                  fontSize: 12,
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--accent-amber)",
+                    marginBottom: 8,
+                  }}
+                >
+                  Undo this dispatch?
+                </div>
+                <div
+                  style={{
+                    color: "var(--text-muted)",
+                    marginBottom: 10,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  Stock will be added back to the most recent open lot for each
+                  item (or a new lot if none exists — flagged for cost review).
+                  The Sale transactions will be removed, and the invoice returns
+                  to Pending Dispatch so you can fix it and dispatch again.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="btn-ghost"
+                    style={{ fontSize: 11 }}
+                    onClick={() => setConfirmUndo(false)}
+                  >
+                    Go back
+                  </button>
+                  <button
+                    className="btn-primary"
+                    style={{ fontSize: 11, background: "var(--accent-amber)" }}
+                    onClick={handleUndoDispatch}
+                    disabled={undoing}
+                  >
+                    {undoing ? "Undoing…" : "Yes, undo dispatch"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
-        <div
-          style={{
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            overflow: "hidden",
-          }}
-        >
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Model</th>
-                <th>HSN</th>
-                <th style={{ textAlign: "right" }}>Qty</th>
-                <th style={{ textAlign: "right" }}>Rate</th>
-                <th style={{ textAlign: "right" }}>Disc</th>
-                <th style={{ textAlign: "right" }}>Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {invoice.line_items.map((l, i) => {
-                const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
-                return (
-                  <React.Fragment key={i}>
-                    <tr>
-                      <td style={{ color: "var(--text-muted)" }}>{i + 1}</td>
-                      <td>
-                        <div style={{ fontWeight: 500 }}>{l.model}</div>
-                        {l.description && (
+        {/* ── Match unrecorded serial to a purchase — one at a time ── */}
+        {wizardActive &&
+          (() => {
+            const current = unmatchedSerials![assignStep];
+            const total = unmatchedSerials!.length;
+            const chosen = serialChoices[current.serial];
+            const isLast = assignStep === total - 1;
+            const totalAvailable = current.candidateLots.reduce(
+              (s, l) => s + l.remaining_qty,
+              0,
+            );
+
+            return (
+              <div
+                style={{
+                  background: "rgba(59,130,246,0.06)",
+                  border: "1px solid rgba(59,130,246,0.3)",
+                  borderRadius: 8,
+                  padding: "14px 16px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 14,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      marginBottom: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: "var(--accent)",
+                      }}
+                    >
+                      Match unrecorded serial to a purchase
+                    </div>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      {assignStep + 1} of {total}
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      height: 6,
+                      borderRadius: 99,
+                      background: "var(--bg-input)",
+                      overflow: "hidden",
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${((assignStep + 1) / total) * 100}%`,
+                        background: "var(--accent)",
+                        borderRadius: 99,
+                        transition: "width 0.2s ease",
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-muted)",
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    This invoice can't be dispatched until every serial below is
+                    matched to the purchase it actually came from.
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                  {/* Left: the serial that needs matching */}
+                  <div
+                    style={{
+                      width: 220,
+                      flexShrink: 0,
+                      background: "var(--bg-card)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      padding: "14px 12px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 10,
+                        color: "var(--text-muted)",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.05em",
+                        marginBottom: 6,
+                      }}
+                    >
+                      Serial number
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: "monospace",
+                        fontSize: 16,
+                        fontWeight: 700,
+                        color: "var(--accent-amber)",
+                        lineHeight: 1.3,
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {current.serial}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "var(--text-dim)",
+                        marginTop: 6,
+                      }}
+                    >
+                      {current.model}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        marginTop: 10,
+                        lineHeight: 1.6,
+                      }}
+                    >
+                      Not found in stock records — but{" "}
+                      <strong style={{ color: "var(--accent-green)" }}>
+                        {totalAvailable} unit(s)
+                      </strong>{" "}
+                      of this model are available.
+                    </div>
+                  </div>
+
+                  {/* Right: candidate purchases */}
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 260,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        marginBottom: 2,
+                      }}
+                    >
+                      Which purchase did this unit come from?
+                    </div>
+                    {current.candidateLots.length === 0 ? (
+                      <div style={{ fontSize: 12, color: "var(--accent-red)" }}>
+                        No open purchase found for this model — record a
+                        Purchase for it first.
+                      </div>
+                    ) : (
+                      current.candidateLots.map((l) => {
+                        const isChosen = chosen === l.lot_id;
+                        return (
                           <div
-                            style={{ fontSize: 10, color: "var(--text-muted)" }}
-                          >
-                            {l.description}
-                          </div>
-                        )}
-                        {l.warranty && (
-                          <div
-                            style={{ fontSize: 10, color: "var(--text-muted)" }}
-                          >
-                            Warranty: {l.warranty}
-                          </div>
-                        )}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          fontFamily: "monospace",
-                        }}
-                      >
-                        {l.hsn}
-                      </td>
-                      <td style={{ textAlign: "right" }}>{l.qty}</td>
-                      <td style={{ textAlign: "right" }}>
-                        {fmtMoney(l.unitSalePrice)}
-                        {l.discount > 0 && (
-                          <div
-                            style={{
-                              fontSize: 10,
-                              color: "var(--accent-amber)",
-                            }}
-                          >
-                            -&gt; {fmtMoney(eff)}
-                          </div>
-                        )}
-                      </td>
-                      <td
-                        style={{
-                          textAlign: "right",
-                          color:
-                            l.discount > 0
-                              ? "var(--accent-amber)"
-                              : "var(--text-muted)",
-                        }}
-                      >
-                        {l.discount > 0 ? `${l.discount}%` : "-"}
-                      </td>
-                      <td style={{ textAlign: "right", fontWeight: 500 }}>
-                        {fmtMoney(eff * l.qty)}
-                      </td>
-                    </tr>
-                    {l.serialNumbers?.filter(Boolean).length > 0 && (
-                      <tr
-                        key={`sn-${i}`}
-                        style={{ background: "rgba(255,255,255,0.01)" }}
-                      >
-                        <td />
-                        <td colSpan={6}>
-                          <div
+                            key={l.lot_id}
+                            onClick={() =>
+                              setSerialChoices((prev) => ({
+                                ...prev,
+                                [current.serial]: l.lot_id,
+                              }))
+                            }
                             style={{
                               display: "flex",
-                              gap: 6,
-                              flexWrap: "wrap",
-                              paddingBottom: 4,
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: 10,
+                              padding: "10px 12px",
+                              borderRadius: 6,
+                              border: isChosen
+                                ? "1.5px solid var(--accent)"
+                                : "1px solid var(--border)",
+                              background: isChosen
+                                ? "rgba(59,130,246,0.1)"
+                                : "var(--bg-input)",
+                              cursor: "pointer",
                             }}
                           >
-                            {l.serialNumbers.filter(Boolean).map((sn, si) => (
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                              }}
+                            >
                               <span
-                                key={si}
                                 style={{
-                                  fontSize: 10,
-                                  fontFamily: "monospace",
-                                  background: "var(--bg-input)",
-                                  padding: "1px 6px",
-                                  borderRadius: 4,
-                                  color: "var(--text-muted)",
+                                  width: 16,
+                                  height: 16,
+                                  borderRadius: "50%",
+                                  border: `1.5px solid ${isChosen ? "var(--accent)" : "var(--text-muted)"}`,
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  flexShrink: 0,
                                 }}
                               >
-                                S/N {si + 1}: {sn}
+                                {isChosen && (
+                                  <span
+                                    style={{
+                                      width: 8,
+                                      height: 8,
+                                      borderRadius: "50%",
+                                      background: "var(--accent)",
+                                    }}
+                                  />
+                                )}
                               </span>
-                            ))}
+                              <div>
+                                <div style={{ fontSize: 12, fontWeight: 500 }}>
+                                  Purchased {fmtDate(l.date)} from{" "}
+                                  {l.vendor || "unknown vendor"}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: 10,
+                                    color: "var(--text-muted)",
+                                    marginTop: 1,
+                                  }}
+                                >
+                                  Invoice/PO {l.po_invoice || "—"}
+                                </div>
+                              </div>
+                            </div>
+                            <span
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 600,
+                                color: "var(--accent-green)",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {l.remaining_qty} left
+                            </span>
                           </div>
-                        </td>
-                      </tr>
+                        );
+                      })
                     )}
-                  </React.Fragment>
-                );
-              })}
-              {(invoice.charges ?? []).map((c, ci) => (
-                <tr
-                  key={`charge-${ci}`}
-                  style={{ background: "rgba(255,255,255,0.01)" }}
-                >
-                  <td style={{ color: "var(--text-muted)" }}>-</td>
-                  <td
-                    colSpan={3}
-                    style={{ color: "var(--text-dim)", fontStyle: "italic" }}
-                  >
-                    {c.label}
-                  </td>
-                  <td style={{ textAlign: "right" }}>{fmtMoney(c.amount)}</td>
-                  <td
-                    style={{ textAlign: "right", color: "var(--text-muted)" }}
-                  >
-                    -
-                  </td>
-                  <td style={{ textAlign: "right", fontWeight: 500 }}>
-                    {fmtMoney(c.amount)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  </div>
+                </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <div
-            style={{
-              background: "var(--bg-input)",
-              borderRadius: 8,
-              padding: "10px 14px",
-              minWidth: 260,
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 12,
-                color: "var(--text-dim)",
-              }}
-            >
-              <span>Products sub-total</span>
-              <span>{fmtMoney(productSubtotal)}</span>
-            </div>
-            {chargesTotal > 0 &&
-              (invoice.charges ?? []).map((c, i) => (
                 <div
-                  key={i}
                   style={{
                     display: "flex",
                     justifyContent: "space-between",
-                    fontSize: 11,
-                    color: "var(--text-muted)",
+                    alignItems: "center",
                   }}
                 >
-                  <span>{c.label}</span>
-                  <span>{fmtMoney(c.amount)}</span>
+                  <button
+                    className="btn-ghost"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setAssignStep((s) => Math.max(0, s - 1))}
+                    disabled={assignStep === 0}
+                  >
+                    ← Back
+                  </button>
+                  {isLast ? (
+                    <button
+                      className="btn-primary"
+                      style={{
+                        fontSize: 12,
+                        background: "var(--accent-green)",
+                      }}
+                      onClick={() => handleDispatch()}
+                      disabled={dispatching || !chosen}
+                    >
+                      {dispatching
+                        ? "Dispatching…"
+                        : "✓ Confirm purchases → dispatch"}
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-primary"
+                      style={{ fontSize: 12 }}
+                      onClick={() => setAssignStep((s) => s + 1)}
+                      disabled={!chosen}
+                    >
+                      Next →
+                    </button>
+                  )}
                 </div>
-              ))}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 12,
-                color: "var(--text-dim)",
-              }}
-            >
-              <span>GST ({invoice.gst_rate}%)</span>
-              <span>{fmtMoney(invoice.gst_amount)}</span>
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 15,
-                fontWeight: 700,
-                color: "var(--accent-green)",
-                borderTop: "1px solid var(--border)",
-                paddingTop: 6,
-                marginTop: 2,
-              }}
-            >
-              <span>Total</span>
-              <span>{fmtMoney(invoice.total)}</span>
-            </div>
-          </div>
-        </div>
-
-        {isPending && (
-          <div
-            style={{
-              background: "rgba(34,197,94,0.06)",
-              border: "1px solid rgba(34,197,94,0.25)",
-              borderRadius: 8,
-              padding: "12px 14px",
-            }}
-          >
-            <div
-              style={{
-                fontSize: 12,
-                fontWeight: 600,
-                color: "var(--accent-green)",
-                marginBottom: 8,
-              }}
-            >
-              Ready to dispatch?
-            </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                flexWrap: "wrap",
-              }}
-            >
-              <div>
-                <label
-                  style={{
-                    fontSize: 10,
-                    color: "var(--text-muted)",
-                    display: "block",
-                    marginBottom: 3,
-                  }}
-                >
-                  Dispatch date
-                </label>
-                <input
-                  type="date"
-                  value={dispatchDate}
-                  onChange={(e) => setDispatchDate(e.target.value)}
-                  style={{ width: 160 }}
-                />
               </div>
-              <button
-                className="btn-primary"
-                style={{
-                  fontSize: 12,
-                  background: "var(--accent-green)",
-                  marginTop: 14,
-                }}
-                onClick={handleDispatch}
-                disabled={dispatching}
-              >
-                {dispatching ? "Dispatching..." : "Mark as dispatched"}
-              </button>
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: "var(--accent-green)",
-                opacity: 0.8,
-                marginTop: 6,
-              }}
-            >
-              Deducts{" "}
-              {invoice.line_items.map((l) => `${l.qty}x ${l.model}`).join(", ")}{" "}
-              from {invoice.location} via FIFO and logs the sale.
-            </div>
-          </div>
-        )}
-
-        {isDispatched && !confirmUndo && (
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-              padding: "10px 12px",
-              background: "rgba(245,158,11,0.06)",
-              border: "1px solid rgba(245,158,11,0.25)",
-              borderRadius: 8,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                color: "var(--text-dim)",
-                lineHeight: 1.6,
-              }}
-            >
-              This invoice is dispatched — stock has been deducted via FIFO. If
-              it was marked dispatched by mistake, you can undo it: stock is
-              restored and the invoice returns to Pending Dispatch.
-            </div>
-            <button
-              className="btn-ghost"
-              style={{
-                fontSize: 11,
-                color: "var(--accent-amber)",
-                borderColor: "rgba(245,158,11,0.3)",
-                alignSelf: "flex-start",
-              }}
-              onClick={() => setConfirmUndo(true)}
-            >
-              ↺ Undo dispatch (restore stock)
-            </button>
-          </div>
-        )}
-
-        {confirmUndo && (
-          <div
-            style={{
-              background: "rgba(245,158,11,0.07)",
-              border: "1px solid rgba(245,158,11,0.3)",
-              borderRadius: 8,
-              padding: "10px 14px",
-              fontSize: 12,
-            }}
-          >
-            <div
-              style={{
-                fontWeight: 600,
-                color: "var(--accent-amber)",
-                marginBottom: 8,
-              }}
-            >
-              Undo this dispatch?
-            </div>
-            <div
-              style={{
-                color: "var(--text-muted)",
-                marginBottom: 10,
-                lineHeight: 1.6,
-              }}
-            >
-              Stock will be added back to the most recent open lot for each item
-              (or a new lot if none exists — flagged for cost review). The Sale
-              transactions will be removed, and the invoice returns to Pending
-              Dispatch so you can fix it and dispatch again.
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                className="btn-ghost"
-                style={{ fontSize: 11 }}
-                onClick={() => setConfirmUndo(false)}
-              >
-                Go back
-              </button>
-              <button
-                className="btn-primary"
-                style={{ fontSize: 11, background: "var(--accent-amber)" }}
-                onClick={handleUndoDispatch}
-                disabled={undoing}
-              >
-                {undoing ? "Undoing…" : "Yes, undo dispatch"}
-              </button>
-            </div>
-          </div>
-        )}
+            );
+          })()}
 
         {error && (
           <div
@@ -12396,7 +13949,7 @@ function InvoiceDetail({
           </div>
         )}
 
-        {isPending && !confirmCancel && !confirmDelete && (
+        {!wizardActive && isPending && !confirmCancel && !confirmDelete && (
           <div style={{ display: "flex", justifyContent: "flex-start" }}>
             <button
               className="btn-ghost"
@@ -12453,7 +14006,7 @@ function InvoiceDetail({
           </div>
         )}
 
-        {!isDispatched && !confirmDelete && !confirmCancel && (
+        {!wizardActive && !isDispatched && !confirmDelete && !confirmCancel && (
           <div style={{ display: "flex", justifyContent: "flex-start" }}>
             <button
               className="btn-ghost"
@@ -12518,10 +14071,12 @@ function InvoiceDetail({
 // --- Main Invoices screen ----------------------------------------------------
 export default function Invoices({
   onStockChanged,
+  initialTab = "pending",
 }: {
   onStockChanged?: () => void;
+  initialTab?: "pending" | "all" | "overdue";
 }) {
-  const [tab, setTab] = useState<"pending" | "all">("pending");
+  const [tab, setTab] = useState<"pending" | "all" | "overdue">(initialTab);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Invoice | null>(null);
@@ -12547,6 +14102,8 @@ export default function Invoices({
   }, []);
 
   useEffect(() => {
+    // "overdue" needs every invoice (not just pending) so we can filter by
+    // due date client-side — there's no dedicated status for it.
     load(tab === "pending" ? "pending_dispatch" : undefined);
   }, [tab, load]);
 
@@ -12577,6 +14134,19 @@ export default function Invoices({
   // ── Filter + sort pipeline ─────────────────────────────────────────────────
   const displayedInvoices = useMemo(() => {
     let rows = invoices;
+
+    if (tab === "overdue") {
+      // "Overdue" here means the payment due date has passed. There's no
+      // payment-received tracking in this app, so this can't tell paid
+      // from unpaid — it just surfaces every non-cancelled invoice whose
+      // due date is behind today, same as Zoho's own "OVERDUE BY N DAYS"
+      // badge, which is purely due-date based too.
+      const todayStr = new Date().toISOString().split("T")[0];
+      rows = rows.filter(
+        (inv) =>
+          inv.status !== "cancelled" && inv.due_date && inv.due_date < todayStr,
+      );
+    }
 
     if (search.trim()) {
       rows = rows.filter((inv) => matchesSearch(inv, search.trim()));
@@ -12703,6 +14273,16 @@ export default function Invoices({
             }}
           >
             All invoices
+          </div>
+          <div
+            className={`inv-tab${tab === "overdue" ? " on" : ""}`}
+            onClick={() => {
+              setTab("overdue");
+              setSelected(null);
+              load(); // overdue needs the full unfiltered set
+            }}
+          >
+            Overdue
           </div>
           <div style={{ flex: 1 }} />
           <button
@@ -12965,9 +14545,10 @@ FILE: ./src/components/Ledger.tsx
 // src/components/Ledger.tsx
 // Stock Ledger — source of truth for what came in and what went out.
 // Two tabs: Purchased (IN) and Sold (OUT)
-// Each row = one model, one movement.
+// Each row = one model, one movement. Click a row to expand and see its
+// recorded serial numbers (if any were captured for that transaction).
 
-import { useState, useMemo } from "react";
+import React, { useState, useMemo } from "react";
 
 interface Props {
   sales: any[];
@@ -12999,6 +14580,8 @@ export default function Ledger({ sales, purchases }: Props) {
   const [to, setTo] = useState("");
   const [allTime, setAllTime] = useState(true);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Accordion — only one row's serials expanded at a time. Keyed by txnId.
+  const [expandedTxn, setExpandedTxn] = useState<string | null>(null);
 
   const filter = (rows: any[]) => {
     let r = rows.filter((x) => x.model || x.itemCode);
@@ -13057,6 +14640,69 @@ export default function Ledger({ sales, purchases }: Props) {
   };
   const hasFilters = search || party || !allTime;
 
+  const toggleExpand = (txnId: string) => {
+    setExpandedTxn((prev) => (prev === txnId ? null : txnId));
+  };
+
+  // Renders the serial chips (or an explanatory note) for the expanded row.
+  const SerialDetail = ({ row }: { row: any }) => {
+    const serials: string[] = Array.isArray(row.serialNumbers)
+      ? row.serialNumbers.filter(Boolean)
+      : [];
+    return (
+      <div
+        style={{
+          padding: "10px 14px",
+          background: "rgba(255,255,255,0.02)",
+          borderBottom: "1px solid var(--border)",
+        }}
+      >
+        {serials.length === 0 ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              fontStyle: "italic",
+            }}
+          >
+            No serial numbers recorded for this transaction.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div
+              style={{
+                fontSize: 10,
+                color: "var(--text-muted)",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              Serial number{serials.length !== 1 ? "s" : ""} ({serials.length})
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {serials.map((sn, i) => (
+                <span
+                  key={i}
+                  style={{
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    background: "var(--bg-input)",
+                    border: "1px solid var(--border)",
+                    padding: "3px 9px",
+                    borderRadius: 5,
+                    color: "var(--text-dim)",
+                  }}
+                >
+                  {sn}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <style>{`
@@ -13069,7 +14715,9 @@ export default function Ledger({ sales, purchases }: Props) {
         .ledger-tab.sold.on   { border-bottom-color: var(--accent-green); }
         .ledger-tab.purchased.on { border-bottom-color: var(--accent); }
         .ledger-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
-        .ledger-scroll table { min-width: 700px; }
+        .ledger-scroll table { min-width: 760px; }
+        .ledger-row { cursor: pointer; transition: background 0.1s; }
+        .ledger-row:hover td { background: rgba(255,255,255,0.02); }
         @media (max-width: 720px) {
           .ledger-filter-row { flex-direction: column !important; }
           .ledger-filter-row input, .ledger-filter-row select { width: 100% !important; }
@@ -13080,7 +14728,10 @@ export default function Ledger({ sales, purchases }: Props) {
       <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
         <div
           className={`ledger-tab sold${tab === "sold" ? " on" : ""}`}
-          onClick={() => setTab("sold")}
+          onClick={() => {
+            setTab("sold");
+            setExpandedTxn(null);
+          }}
         >
           ↑ Sold
           <span
@@ -13100,7 +14751,10 @@ export default function Ledger({ sales, purchases }: Props) {
         </div>
         <div
           className={`ledger-tab purchased${tab === "purchased" ? " on" : ""}`}
-          onClick={() => setTab("purchased")}
+          onClick={() => {
+            setTab("purchased");
+            setExpandedTxn(null);
+          }}
         >
           ↓ Purchased
           <span
@@ -13289,6 +14943,7 @@ export default function Ledger({ sales, purchases }: Props) {
           <table>
             <thead>
               <tr>
+                <th style={{ width: 20 }}></th>
                 <th>Date</th>
                 <th>Model</th>
                 <th>Location</th>
@@ -13305,7 +14960,7 @@ export default function Ledger({ sales, purchases }: Props) {
               {rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={11}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -13317,73 +14972,106 @@ export default function Ledger({ sales, purchases }: Props) {
                 </tr>
               ) : (
                 rows.map((r, i) => {
+                  const key = r.txnId ?? String(i);
+                  const isOpen = expandedTxn === key;
                   const sp = Number(r.unitPrice ?? r.unitSalePrice ?? 0);
                   const cost = Number(r.costPrice ?? 0);
                   const tot = Number(r.total ?? 0);
                   const margin =
                     sp > 0 && cost > 0 ? ((sp - cost) / sp) * 100 : null;
+                  const hasSerials =
+                    Array.isArray(r.serialNumbers) &&
+                    r.serialNumbers.filter(Boolean).length > 0;
                   return (
-                    <tr key={r.txnId ?? i}>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          whiteSpace: "nowrap",
-                        }}
+                    <React.Fragment key={key}>
+                      <tr
+                        className="ledger-row"
+                        onClick={() => toggleExpand(key)}
                       >
-                        {fmtDate(r.date)}
-                      </td>
-                      <td style={{ fontWeight: 500 }}>{r.model || "—"}</td>
-                      <td style={{ color: "var(--text-muted)" }}>
-                        {r.location || "—"}
-                      </td>
-                      <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
-                      <td style={{ textAlign: "right" }}>{fmtRs(sp)}</td>
-                      <td style={{ textAlign: "right", fontWeight: 500 }}>
-                        {fmtRs(tot)}
-                      </td>
-                      <td
-                        style={{
-                          textAlign: "right",
-                          color: "var(--text-muted)",
-                        }}
-                      >
-                        {fmtRs(cost)}
-                      </td>
-                      <td
-                        style={{
-                          textAlign: "right",
-                          fontWeight: 500,
-                          color:
-                            margin === null
-                              ? "var(--text-muted)"
-                              : margin > 0
-                                ? "var(--accent-green)"
-                                : "var(--accent-red)",
-                        }}
-                      >
-                        {margin === null ? "—" : `${margin.toFixed(1)}%`}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          maxWidth: 200,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.party ?? r.customer ?? "—"}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--accent)",
-                          fontSize: 11,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.poOrInvoice ?? "—"}
-                      </td>
-                    </tr>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {isOpen ? "▾" : "▸"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {fmtDate(r.date)}
+                        </td>
+                        <td style={{ fontWeight: 500 }}>
+                          {r.model || "—"}
+                          {hasSerials && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 9,
+                                color: "var(--text-muted)",
+                              }}
+                            >
+                              🔢
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {r.location || "—"}
+                        </td>
+                        <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
+                        <td style={{ textAlign: "right" }}>{fmtRs(sp)}</td>
+                        <td style={{ textAlign: "right", fontWeight: 500 }}>
+                          {fmtRs(tot)}
+                        </td>
+                        <td
+                          style={{
+                            textAlign: "right",
+                            color: "var(--text-muted)",
+                          }}
+                        >
+                          {fmtRs(cost)}
+                        </td>
+                        <td
+                          style={{
+                            textAlign: "right",
+                            fontWeight: 500,
+                            color:
+                              margin === null
+                                ? "var(--text-muted)"
+                                : margin > 0
+                                  ? "var(--accent-green)"
+                                  : "var(--accent-red)",
+                          }}
+                        >
+                          {margin === null ? "—" : `${margin.toFixed(1)}%`}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            maxWidth: 200,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.party ?? r.customer ?? "—"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--accent)",
+                            fontSize: 11,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.poOrInvoice ?? "—"}
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={11} style={{ padding: 0 }}>
+                            <SerialDetail row={r} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })
               )}
@@ -13393,6 +15081,7 @@ export default function Ledger({ sales, purchases }: Props) {
           <table>
             <thead>
               <tr>
+                <th style={{ width: 20 }}></th>
                 <th>Date</th>
                 <th>Model</th>
                 <th>Location</th>
@@ -13407,7 +15096,7 @@ export default function Ledger({ sales, purchases }: Props) {
               {rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={8}
+                    colSpan={9}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -13419,48 +15108,81 @@ export default function Ledger({ sales, purchases }: Props) {
                 </tr>
               ) : (
                 rows.map((r, i) => {
+                  const key = r.txnId ?? String(i);
+                  const isOpen = expandedTxn === key;
                   const up = Number(r.unitPrice ?? r.unitPurchasePrice ?? 0);
                   const tot = Number(r.total ?? 0);
+                  const hasSerials =
+                    Array.isArray(r.serialNumbers) &&
+                    r.serialNumbers.filter(Boolean).length > 0;
                   return (
-                    <tr key={r.txnId ?? i}>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          whiteSpace: "nowrap",
-                        }}
+                    <React.Fragment key={key}>
+                      <tr
+                        className="ledger-row"
+                        onClick={() => toggleExpand(key)}
                       >
-                        {fmtDate(r.date)}
-                      </td>
-                      <td style={{ fontWeight: 500 }}>{r.model || "—"}</td>
-                      <td style={{ color: "var(--text-muted)" }}>
-                        {r.location || "—"}
-                      </td>
-                      <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
-                      <td style={{ textAlign: "right" }}>{fmtRs(up)}</td>
-                      <td style={{ textAlign: "right", fontWeight: 500 }}>
-                        {fmtRs(tot)}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          maxWidth: 200,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.party ?? r.vendor ?? r.supplier ?? "—"}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--accent)",
-                          fontSize: 11,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.poOrInvoice ?? "—"}
-                      </td>
-                    </tr>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {isOpen ? "▾" : "▸"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {fmtDate(r.date)}
+                        </td>
+                        <td style={{ fontWeight: 500 }}>
+                          {r.model || "—"}
+                          {hasSerials && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 9,
+                                color: "var(--text-muted)",
+                              }}
+                            >
+                              🔢
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {r.location || "—"}
+                        </td>
+                        <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
+                        <td style={{ textAlign: "right" }}>{fmtRs(up)}</td>
+                        <td style={{ textAlign: "right", fontWeight: 500 }}>
+                          {fmtRs(tot)}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            maxWidth: 200,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.party ?? r.vendor ?? r.supplier ?? "—"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--accent)",
+                            fontSize: 11,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.poOrInvoice ?? "—"}
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={9} style={{ padding: 0 }}>
+                            <SerialDetail row={r} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })
               )}
@@ -13511,6 +15233,21 @@ interface Invoice {
   status: string;
 }
 
+interface CandidateLot {
+  lot_id: string;
+  date: string;
+  vendor: string;
+  po_invoice: string;
+  remaining_qty: number;
+}
+
+interface UnmatchedSerial {
+  model: string;
+  location: string;
+  serial: string;
+  candidateLots: CandidateLot[];
+}
+
 const fmtDate = (iso: string) =>
   new Date(iso).toLocaleDateString("en-IN", {
     day: "2-digit",
@@ -13543,19 +15280,47 @@ function InvoiceDetailModal({
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [error, setError] = useState("");
 
+  // ── Retroactive serial → purchase assignment ──────────────────────────────
+  // Populated when the dispatch API comes back with needsSerialAssignment —
+  // i.e. a serial was entered on this sale that doesn't match any recorded
+  // purchase serial, but there IS open stock for that model (almost always
+  // because the unit was bought before this app tracked serials at all).
+  const [unmatchedSerials, setUnmatchedSerials] = useState<
+    UnmatchedSerial[] | null
+  >(null);
+  const [assignmentMessage, setAssignmentMessage] = useState("");
+  const [serialChoices, setSerialChoices] = useState<Record<string, string>>(
+    {},
+  );
+  const [assignStep, setAssignStep] = useState(0);
+
   const customer = invoice.customer_snapshot;
 
-  const handleDispatch = async () => {
+  const handleDispatch = async (assignments?: Record<string, string>) => {
     setDispatching(true);
     setError("");
     try {
       const r = await fetch(`/api/invoices/${invoice.id}/dispatch`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dispatched_at: dispatchDate }),
+        body: JSON.stringify({
+          dispatched_at: dispatchDate,
+          serialLotAssignments: assignments ?? serialChoices,
+        }),
       });
       const d = await r.json();
+
       if (!r.ok) {
+        if (d.needsSerialAssignment) {
+          setUnmatchedSerials(d.unmatchedSerials ?? []);
+          setAssignmentMessage(
+            d.message ||
+              "Some serials don't match a recorded purchase — pick which purchase each came from below.",
+          );
+          setAssignStep(0);
+          setDispatching(false);
+          return;
+        }
         setError(d.error || "Dispatch failed — check server logs.");
         setDispatching(false);
         return;
@@ -13586,6 +15351,10 @@ function InvoiceDetailModal({
       setCancelling(false);
     }
   };
+
+  const allAssigned =
+    !unmatchedSerials ||
+    unmatchedSerials.every((u) => !!serialChoices[u.serial]);
 
   return (
     <div
@@ -13677,356 +15446,678 @@ function InvoiceDetailModal({
             gap: 14,
           }}
         >
-          {customer && (
-            <div
-              style={{
-                background: "rgba(59,130,246,0.06)",
-                border: "1px solid rgba(59,130,246,0.2)",
-                borderRadius: 8,
-                padding: "10px 14px",
-              }}
-            >
-              <div style={{ fontWeight: 600, fontSize: 13 }}>
-                {customer.display_name || customer.name}
+          {!(unmatchedSerials && unmatchedSerials.length > 0) && (
+            <>
+              {customer && (
+                <div
+                  style={{
+                    background: "rgba(59,130,246,0.06)",
+                    border: "1px solid rgba(59,130,246,0.2)",
+                    borderRadius: 8,
+                    padding: "10px 14px",
+                  }}
+                >
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    {customer.display_name || customer.name}
+                  </div>
+                  {(customer.billing_address || customer.address) && (
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "var(--text-muted)",
+                        marginTop: 2,
+                      }}
+                    >
+                      {[
+                        customer.billing_address || customer.address,
+                        customer.billing_city || customer.city,
+                        customer.billing_state || customer.state,
+                        customer.billing_pincode || customer.pincode,
+                      ]
+                        .filter(Boolean)
+                        .join(", ")}
+                    </div>
+                  )}
+                  {customer.gstin && (
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        marginTop: 2,
+                      }}
+                    >
+                      GSTIN: {customer.gstin}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div
+                style={{
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  overflow: "hidden",
+                }}
+              >
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ background: "var(--bg-input)" }}>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        #
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        Model
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        HSN
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "right",
+                          padding: "8px 10px",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        Qty
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "right",
+                          padding: "8px 10px",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        Rate
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "right",
+                          padding: "8px 10px",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        Disc
+                      </th>
+                      <th
+                        style={{
+                          textAlign: "right",
+                          padding: "8px 10px",
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        Amount
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {invoice.line_items.map((l, i) => {
+                      const effectiveRate =
+                        l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
+                      const amount = effectiveRate * l.qty;
+                      return (
+                        <React.Fragment key={i}>
+                          <tr>
+                            <td
+                              style={{
+                                padding: "8px 10px",
+                                fontSize: 12,
+                                color: "var(--text-muted)",
+                              }}
+                            >
+                              {i + 1}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px 10px",
+                                fontSize: 12,
+                                fontWeight: 500,
+                              }}
+                            >
+                              {l.model}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px 10px",
+                                fontSize: 12,
+                                color: "var(--text-muted)",
+                                fontFamily: "monospace",
+                              }}
+                            >
+                              {l.hsn}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px 10px",
+                                fontSize: 12,
+                                textAlign: "right",
+                              }}
+                            >
+                              {l.qty}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px 10px",
+                                fontSize: 12,
+                                textAlign: "right",
+                              }}
+                            >
+                              {fmtMoney(l.unitSalePrice)}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px 10px",
+                                fontSize: 12,
+                                textAlign: "right",
+                                color:
+                                  l.discount > 0
+                                    ? "var(--accent-amber)"
+                                    : "var(--text-muted)",
+                              }}
+                            >
+                              {l.discount > 0 ? `${l.discount}%` : "—"}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px 10px",
+                                fontSize: 12,
+                                textAlign: "right",
+                                fontWeight: 500,
+                              }}
+                            >
+                              {fmtMoney(amount)}
+                            </td>
+                          </tr>
+                          {l.serialNumbers?.filter(Boolean).length > 0 && (
+                            <tr
+                              style={{ background: "rgba(255,255,255,0.01)" }}
+                            >
+                              <td />
+                              <td colSpan={6} style={{ padding: "0 10px 8px" }}>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    gap: 6,
+                                    flexWrap: "wrap",
+                                  }}
+                                >
+                                  {l.serialNumbers
+                                    .filter(Boolean)
+                                    .map((sn, si) => (
+                                      <span
+                                        key={si}
+                                        style={{
+                                          fontSize: 10,
+                                          fontFamily: "monospace",
+                                          background: "var(--bg-input)",
+                                          padding: "1px 6px",
+                                          borderRadius: 4,
+                                          color: "var(--text-muted)",
+                                        }}
+                                      >
+                                        S/N {si + 1}: {sn}
+                                      </span>
+                                    ))}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
-              {(customer.billing_address || customer.address) && (
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <div
+                  style={{
+                    background: "var(--bg-input)",
+                    borderRadius: 8,
+                    padding: "10px 16px",
+                    minWidth: 240,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontSize: 12,
+                      color: "var(--text-dim)",
+                    }}
+                  >
+                    <span>Sub total</span>
+                    <span>{fmtMoney(invoice.subtotal)}</span>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontSize: 12,
+                      color: "var(--text-dim)",
+                    }}
+                  >
+                    <span>GST ({invoice.gst_rate}%)</span>
+                    <span>{fmtMoney(invoice.gst_amount)}</span>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontSize: 15,
+                      fontWeight: 700,
+                      color: "var(--accent-green)",
+                      borderTop: "1px solid var(--border)",
+                      paddingTop: 6,
+                      marginTop: 4,
+                    }}
+                  >
+                    <span>Total</span>
+                    <span>{fmtMoney(invoice.total)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  background: "rgba(34,197,94,0.06)",
+                  border: "1px solid rgba(34,197,94,0.25)",
+                  borderRadius: 8,
+                  padding: "12px 14px",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: "var(--accent-green)",
+                    marginBottom: 8,
+                  }}
+                >
+                  Ready to dispatch?
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    <label
+                      style={{
+                        fontSize: 10,
+                        color: "var(--text-muted)",
+                        display: "block",
+                        marginBottom: 3,
+                      }}
+                    >
+                      Dispatch date
+                    </label>
+                    <input
+                      type="date"
+                      value={dispatchDate}
+                      onChange={(e) => setDispatchDate(e.target.value)}
+                      style={{ width: 160 }}
+                    />
+                  </div>
+                </div>
                 <div
                   style={{
                     fontSize: 12,
-                    color: "var(--text-muted)",
-                    marginTop: 2,
+                    color: "var(--accent-green)",
+                    opacity: 0.85,
+                    marginTop: 8,
                   }}
                 >
-                  {[
-                    customer.billing_address || customer.address,
-                    customer.billing_city || customer.city,
-                    customer.billing_state || customer.state,
-                    customer.billing_pincode || customer.pincode,
-                  ]
-                    .filter(Boolean)
-                    .join(", ")}
+                  Clicking <strong>Mark as Dispatched</strong> will deduct{" "}
+                  {invoice.line_items
+                    .map((l) => `${l.qty}× ${l.model}`)
+                    .join(", ")}{" "}
+                  from <strong>{invoice.location}</strong> stock using FIFO and
+                  log the sale transactions.
                 </div>
-              )}
-              {customer.gstin && (
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: "var(--text-muted)",
-                    marginTop: 2,
-                  }}
-                >
-                  GSTIN: {customer.gstin}
-                </div>
-              )}
-            </div>
+              </div>
+            </>
           )}
 
-          <div
-            style={{
-              border: "1px solid var(--border)",
-              borderRadius: 8,
-              overflow: "hidden",
-            }}
-          >
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ background: "var(--bg-input)" }}>
-                  <th
-                    style={{
-                      textAlign: "left",
-                      padding: "8px 10px",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    #
-                  </th>
-                  <th
-                    style={{
-                      textAlign: "left",
-                      padding: "8px 10px",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    Model
-                  </th>
-                  <th
-                    style={{
-                      textAlign: "left",
-                      padding: "8px 10px",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    HSN
-                  </th>
-                  <th
-                    style={{
-                      textAlign: "right",
-                      padding: "8px 10px",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    Qty
-                  </th>
-                  <th
-                    style={{
-                      textAlign: "right",
-                      padding: "8px 10px",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    Rate
-                  </th>
-                  <th
-                    style={{
-                      textAlign: "right",
-                      padding: "8px 10px",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    Disc
-                  </th>
-                  <th
-                    style={{
-                      textAlign: "right",
-                      padding: "8px 10px",
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                    }}
-                  >
-                    Amount
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {invoice.line_items.map((l, i) => {
-                  const effectiveRate =
-                    l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
-                  const amount = effectiveRate * l.qty;
-                  return (
-                    // FIX: React.Fragment with a key — the <> shorthand cannot take a key prop.
-                    <React.Fragment key={i}>
-                      <tr>
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            color: "var(--text-muted)",
-                          }}
-                        >
-                          {i + 1}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            fontWeight: 500,
-                          }}
-                        >
-                          {l.model}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            color: "var(--text-muted)",
-                            fontFamily: "monospace",
-                          }}
-                        >
-                          {l.hsn}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            textAlign: "right",
-                          }}
-                        >
-                          {l.qty}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            textAlign: "right",
-                          }}
-                        >
-                          {fmtMoney(l.unitSalePrice)}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            textAlign: "right",
-                            color:
-                              l.discount > 0
-                                ? "var(--accent-amber)"
-                                : "var(--text-muted)",
-                          }}
-                        >
-                          {l.discount > 0 ? `${l.discount}%` : "—"}
-                        </td>
-                        <td
-                          style={{
-                            padding: "8px 10px",
-                            fontSize: 12,
-                            textAlign: "right",
-                            fontWeight: 500,
-                          }}
-                        >
-                          {fmtMoney(amount)}
-                        </td>
-                      </tr>
-                      {l.serialNumbers?.filter(Boolean).length > 0 && (
-                        <tr style={{ background: "rgba(255,255,255,0.01)" }}>
-                          <td />
-                          <td colSpan={6} style={{ padding: "0 10px 8px" }}>
-                            <div
-                              style={{
-                                display: "flex",
-                                gap: 6,
-                                flexWrap: "wrap",
-                              }}
-                            >
-                              {l.serialNumbers.filter(Boolean).map((sn, si) => (
-                                <span
-                                  key={si}
-                                  style={{
-                                    fontSize: 10,
-                                    fontFamily: "monospace",
-                                    background: "var(--bg-input)",
-                                    padding: "1px 6px",
-                                    borderRadius: 4,
-                                    color: "var(--text-muted)",
-                                  }}
-                                >
-                                  S/N {si + 1}: {sn}
-                                </span>
-                              ))}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          {/* ── Match unrecorded serials to a purchase — one at a time ── */}
+          {unmatchedSerials &&
+            unmatchedSerials.length > 0 &&
+            (() => {
+              const current = unmatchedSerials[assignStep];
+              const total = unmatchedSerials.length;
+              const chosen = serialChoices[current.serial];
+              const isLast = assignStep === total - 1;
+              const totalAvailable = current.candidateLots.reduce(
+                (s, l) => s + l.remaining_qty,
+                0,
+              );
 
-          <div style={{ display: "flex", justifyContent: "flex-end" }}>
-            <div
-              style={{
-                background: "var(--bg-input)",
-                borderRadius: 8,
-                padding: "10px 16px",
-                minWidth: 240,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: 12,
-                  color: "var(--text-dim)",
-                }}
-              >
-                <span>Sub total</span>
-                <span>{fmtMoney(invoice.subtotal)}</span>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: 12,
-                  color: "var(--text-dim)",
-                }}
-              >
-                <span>GST ({invoice.gst_rate}%)</span>
-                <span>{fmtMoney(invoice.gst_amount)}</span>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: 15,
-                  fontWeight: 700,
-                  color: "var(--accent-green)",
-                  borderTop: "1px solid var(--border)",
-                  paddingTop: 6,
-                  marginTop: 4,
-                }}
-              >
-                <span>Total</span>
-                <span>{fmtMoney(invoice.total)}</span>
-              </div>
-            </div>
-          </div>
-
-          <div
-            style={{
-              background: "rgba(34,197,94,0.06)",
-              border: "1px solid rgba(34,197,94,0.25)",
-              borderRadius: 8,
-              padding: "12px 14px",
-            }}
-          >
-            <div
-              style={{
-                fontSize: 13,
-                fontWeight: 600,
-                color: "var(--accent-green)",
-                marginBottom: 8,
-              }}
-            >
-              Ready to dispatch?
-            </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                flexWrap: "wrap",
-              }}
-            >
-              <div>
-                <label
+              return (
+                <div
                   style={{
-                    fontSize: 10,
-                    color: "var(--text-muted)",
-                    display: "block",
-                    marginBottom: 3,
+                    background: "rgba(59,130,246,0.06)",
+                    border: "1px solid rgba(59,130,246,0.3)",
+                    borderRadius: 8,
+                    padding: "14px 16px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 14,
                   }}
                 >
-                  Dispatch date
-                </label>
-                <input
-                  type="date"
-                  value={dispatchDate}
-                  onChange={(e) => setDispatchDate(e.target.value)}
-                  style={{ width: 160 }}
-                />
-              </div>
-            </div>
-            <div
-              style={{
-                fontSize: 12,
-                color: "var(--accent-green)",
-                opacity: 0.85,
-                marginTop: 8,
-              }}
-            >
-              Clicking <strong>Mark as Dispatched</strong> will deduct{" "}
-              {invoice.line_items.map((l) => `${l.qty}× ${l.model}`).join(", ")}{" "}
-              from <strong>{invoice.location}</strong> stock using FIFO and log
-              the sale transactions.
-            </div>
-          </div>
+                  <div>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        marginBottom: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 14,
+                          fontWeight: 600,
+                          color: "var(--accent)",
+                        }}
+                      >
+                        Match unrecorded serial to a purchase
+                      </div>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: "var(--text-muted)",
+                        }}
+                      >
+                        {assignStep + 1} of {total}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        height: 6,
+                        borderRadius: 99,
+                        background: "var(--bg-input)",
+                        overflow: "hidden",
+                        marginBottom: 10,
+                      }}
+                    >
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${((assignStep + 1) / total) * 100}%`,
+                          background: "var(--accent)",
+                          borderRadius: 99,
+                          transition: "width 0.2s ease",
+                        }}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        lineHeight: 1.6,
+                      }}
+                    >
+                      This invoice can't be dispatched until every serial below
+                      is matched to the purchase it actually came from.
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 16,
+                      flexWrap: "wrap",
+                    }}
+                  >
+                    {/* Left: the serial that needs matching */}
+                    <div
+                      style={{
+                        width: 220,
+                        flexShrink: 0,
+                        background: "var(--bg-card)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: "14px 12px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 10,
+                          color: "var(--text-muted)",
+                          textTransform: "uppercase",
+                          letterSpacing: "0.05em",
+                          marginBottom: 6,
+                        }}
+                      >
+                        Serial number
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: 16,
+                          fontWeight: 700,
+                          color: "var(--accent-amber)",
+                          lineHeight: 1.3,
+                          wordBreak: "break-all",
+                        }}
+                      >
+                        {current.serial}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "var(--text-dim)",
+                          marginTop: 6,
+                        }}
+                      >
+                        {current.model}
+                      </div>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          marginTop: 10,
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        Not found in stock records — but{" "}
+                        <strong style={{ color: "var(--accent-green)" }}>
+                          {totalAvailable} unit(s)
+                        </strong>{" "}
+                        of this model are available.
+                      </div>
+                    </div>
+
+                    {/* Right: candidate purchases to pick from */}
+                    <div
+                      style={{
+                        flex: 1,
+                        minWidth: 260,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 11,
+                          color: "var(--text-muted)",
+                          marginBottom: 2,
+                        }}
+                      >
+                        Which purchase did this unit come from?
+                      </div>
+                      {current.candidateLots.length === 0 ? (
+                        <div
+                          style={{ fontSize: 12, color: "var(--accent-red)" }}
+                        >
+                          No open purchase found for this model — record a
+                          Purchase for it first.
+                        </div>
+                      ) : (
+                        current.candidateLots.map((l) => {
+                          const isChosen = chosen === l.lot_id;
+                          return (
+                            <div
+                              key={l.lot_id}
+                              onClick={() =>
+                                setSerialChoices((prev) => ({
+                                  ...prev,
+                                  [current.serial]: l.lot_id,
+                                }))
+                              }
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                padding: "10px 12px",
+                                borderRadius: 6,
+                                border: isChosen
+                                  ? "1.5px solid var(--accent)"
+                                  : "1px solid var(--border)",
+                                background: isChosen
+                                  ? "rgba(59,130,246,0.1)"
+                                  : "var(--bg-input)",
+                                cursor: "pointer",
+                              }}
+                            >
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    width: 16,
+                                    height: 16,
+                                    borderRadius: "50%",
+                                    border: `1.5px solid ${isChosen ? "var(--accent)" : "var(--text-muted)"}`,
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {isChosen && (
+                                    <span
+                                      style={{
+                                        width: 8,
+                                        height: 8,
+                                        borderRadius: "50%",
+                                        background: "var(--accent)",
+                                      }}
+                                    />
+                                  )}
+                                </span>
+                                <div>
+                                  <div
+                                    style={{ fontSize: 12, fontWeight: 500 }}
+                                  >
+                                    Purchased {fmtDate(l.date)} from{" "}
+                                    {l.vendor || "unknown vendor"}
+                                  </div>
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: "var(--text-muted)",
+                                      marginTop: 1,
+                                    }}
+                                  >
+                                    Invoice/PO {l.po_invoice || "—"}
+                                  </div>
+                                </div>
+                              </div>
+                              <span
+                                style={{
+                                  fontSize: 11,
+                                  fontWeight: 600,
+                                  color: "var(--accent-green)",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {l.remaining_qty} left
+                              </span>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <button
+                      className="btn-ghost"
+                      style={{ fontSize: 12 }}
+                      onClick={() => setAssignStep((s) => Math.max(0, s - 1))}
+                      disabled={assignStep === 0}
+                    >
+                      ← Back
+                    </button>
+                    {isLast ? (
+                      <button
+                        className="btn-primary"
+                        style={{
+                          fontSize: 12,
+                          background: "var(--accent-green)",
+                        }}
+                        onClick={() => handleDispatch()}
+                        disabled={dispatching || !chosen}
+                      >
+                        {dispatching
+                          ? "Dispatching…"
+                          : "✓ Confirm purchases → dispatch"}
+                      </button>
+                    ) : (
+                      <button
+                        className="btn-primary"
+                        style={{ fontSize: 12 }}
+                        onClick={() => setAssignStep((s) => s + 1)}
+                        disabled={!chosen}
+                      >
+                        Next →
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
           {error && (
             <div
@@ -14141,26 +16232,32 @@ function InvoiceDetailModal({
           >
             Close
           </button>
-          <button
-            onClick={handleDispatch}
-            disabled={dispatching}
-            style={{
-              background: dispatching
-                ? "var(--text-muted)"
-                : "var(--accent-green)",
-              border: "none",
-              color: "#fff",
-              borderRadius: 6,
-              fontSize: 12,
-              padding: "7px 16px",
-              cursor: dispatching ? "not-allowed" : "pointer",
-              fontWeight: 600,
-            }}
-          >
-            {dispatching
-              ? "Dispatching…"
-              : "✓ Mark as Dispatched → update stock"}
-          </button>
+          {/* Hide the primary dispatch button once we're in "assign serials"
+              mode — the confirm button above (inside that panel) is the
+              correct next action, and having two dispatch-triggering
+              buttons on screen at once is confusing. */}
+          {!(unmatchedSerials && unmatchedSerials.length > 0) && (
+            <button
+              onClick={() => handleDispatch()}
+              disabled={dispatching}
+              style={{
+                background: dispatching
+                  ? "var(--text-muted)"
+                  : "var(--accent-green)",
+                border: "none",
+                color: "#fff",
+                borderRadius: 6,
+                fontSize: 12,
+                padding: "7px 16px",
+                cursor: dispatching ? "not-allowed" : "pointer",
+                fontWeight: 600,
+              }}
+            >
+              {dispatching
+                ? "Dispatching…"
+                : "✓ Mark as Dispatched → update stock"}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -18159,6 +20256,92 @@ function isModelMatched(products: any[], model: string): boolean {
   return products.some((p) => p.model.toLowerCase() === model.toLowerCase());
 }
 
+// ─── Generic "did you mean" matching ───────────────────────────────────────
+// No hardcoded aliases — just finds the closest existing catalogue model(s)
+// to whatever was typed/scanned, so any future naming mismatch gets a
+// helpful nudge instead of a silent "not in catalogue".
+
+// Levenshtein distance — small, no dependency needed for product-name-length strings.
+function levenshtein(a: string, b: string): number {
+  const m = a.length,
+    n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const dp = Array.from({ length: m + 1 }, (_, i) =>
+    Array(n + 1)
+      .fill(0)
+      .map((_, j) => (i === 0 ? j : 0)),
+  );
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] =
+        a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Normalises for comparison: lowercase, collapse whitespace/punctuation
+// so "15B Max", "15B-MAX", "15b  max" etc. all compare the same way.
+function normForMatch(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\-_/()+]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Returns the catalogue product(s) most likely to be what the user meant,
+// or [] if nothing is close enough to be worth suggesting.
+function findSimilarProducts(products: any[], typed: string, max = 2): any[] {
+  const query = normForMatch(typed);
+  if (!query) return [];
+
+  const scored = products.map((p) => {
+    const cand = normForMatch(p.model);
+    let score: number;
+
+    // Exact normalized match (e.g. only punctuation/case differed) — treat as
+    // a near-perfect suggestion even if the raw strings didn't match.
+    if (cand === query) {
+      score = 0;
+    } else if (cand.startsWith(query) || query.startsWith(cand)) {
+      // Prefix / substring relationship (e.g. "15B Max" -> "15B Max-01 (TL75)")
+      // is a very strong signal — Fluke's "-01 default variant" pattern.
+      score = 0.5;
+    } else if (cand.includes(query) || query.includes(cand)) {
+      score = 1;
+    } else {
+      // Otherwise fall back to edit distance, normalised by length so short
+      // and long model names are comparable.
+      const dist = levenshtein(query, cand);
+      const normalizedDist = dist / Math.max(query.length, cand.length);
+      score = 2 + normalizedDist; // offset so substring matches always rank above
+    }
+
+    // Tie-breaking nudge: when a bare/ambiguous name (e.g. "15B Max") could
+    // mean either a numbered variant ("-01 (TL75)") or a bundled accessory
+    // set ("... Kit"), the numbered variant is the actual default SKU and
+    // should be suggested first. Small enough to only matter within the
+    // same score tier, never enough to override a genuinely closer match.
+    if (/\bkit\b|\bcombo\b|\bset\b/.test(cand)) score += 0.05;
+    if (/-0\d\b|\b0\d\b/.test(cand)) score -= 0.05;
+
+    return { p, score };
+  });
+
+  return scored
+    .filter((s) => s.score <= 2.35) // cutoff — tune if it feels too loose/strict
+    .sort((a, b) => a.score - b.score)
+    .slice(0, max)
+    .map((s) => s.p);
+}
+
 // ─── Serial number stock verification ──────────────────────────────────────────
 type SerialStatus =
   | "checking"
@@ -18186,9 +20369,11 @@ const SERIAL_STATUS_META: Record<
 function CustomerSearch({
   onSelect,
   selected,
+  hasError,
 }: {
   onSelect: (c: Customer | null) => void;
   selected: Customer | null;
+  hasError?: boolean;
 }) {
   const [query, setQuery] = useState(selected?.name ?? "");
   const [results, setResults] = useState<Customer[]>([]);
@@ -18367,7 +20552,22 @@ function CustomerSearch({
               setOpen(true);
               if (!query) search("");
             }}
+            style={{
+              borderColor: hasError ? "var(--accent-red)" : undefined,
+              boxShadow: hasError ? "0 0 0 1px var(--accent-red)" : undefined,
+            }}
           />
+          {hasError && (
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--accent-red)",
+                marginTop: 4,
+              }}
+            >
+              Customer is required
+            </div>
+          )}
           {open && (
             <div
               style={{
@@ -18733,6 +20933,7 @@ export default function RecordSale({ products, onSuccess }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [customerError, setCustomerError] = useState(false);
 
   // ── Invoice Import (Claude JSON / Excel) ──────────────────────────────────
   const [showImport, setShowImport] = useState(false);
@@ -19013,14 +21214,17 @@ export default function RecordSale({ products, onSuccess }: Props) {
   );
 
   const handleSave = async () => {
+    setCustomerError(false);
     if (!invoiceNum.trim()) {
       setError("Invoice number is required.");
       return;
     }
     if (!customer) {
       setError("Please select or create a customer.");
+      setCustomerError(true);
       return;
     }
+    setCustomerError(false);
     const validLines = lines.filter(
       (l) => l.model && l.qty > 0 && l.unitSalePrice > 0,
     );
@@ -19254,7 +21458,14 @@ export default function RecordSale({ products, onSuccess }: Props) {
             </button>
           </div>
         )}
-        <CustomerSearch selected={customer} onSelect={setCustomer} />
+        <CustomerSearch
+          selected={customer}
+          onSelect={(c) => {
+            setCustomer(c);
+            if (c) setCustomerError(false);
+          }}
+          hasError={customerError}
+        />
       </div>
 
       {/* Line items */}
@@ -19283,6 +21494,9 @@ export default function RecordSale({ products, onSuccess }: Props) {
               line.unitSalePrice * (1 - line.discount / 100);
             const lineTotal = effectivePrice * line.qty;
             const modelMatched = isModelMatched(products, line.model);
+            const suggestions = !modelMatched
+              ? findSimilarProducts(products, line.model)
+              : [];
 
             return (
               <div
@@ -19315,6 +21529,7 @@ export default function RecordSale({ products, onSuccess }: Props) {
                       display: "flex",
                       alignItems: "center",
                       gap: 6,
+                      flexWrap: "wrap",
                     }}
                   >
                     Item {i + 1}
@@ -19337,9 +21552,42 @@ export default function RecordSale({ products, onSuccess }: Props) {
                           fontWeight: 700,
                           textTransform: "none",
                           letterSpacing: 0,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          flexWrap: "wrap",
                         }}
                       >
-                        ⚠ not in catalogue
+                        {suggestions.length > 0 ? (
+                          <>
+                            ⚠ not found — did you mean{" "}
+                            {suggestions.map((s, si) => (
+                              <span key={s.model}>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onProductSelect(i, s);
+                                  }}
+                                  style={{
+                                    background: "none",
+                                    border: "none",
+                                    padding: 0,
+                                    color: "var(--accent-amber)",
+                                    textDecoration: "underline",
+                                    fontWeight: 700,
+                                    cursor: "pointer",
+                                    fontSize: 9,
+                                  }}
+                                >
+                                  {s.model}
+                                </button>
+                                {si < suggestions.length - 1 ? " or " : "?"}
+                              </span>
+                            ))}
+                          </>
+                        ) : (
+                          "⚠ not in catalogue"
+                        )}
                       </span>
                     )}
                     {line.model && modelMatched && (
@@ -19725,6 +21973,7 @@ export default function RecordSale({ products, onSuccess }: Props) {
             setCustomer(null);
             setNotes("");
             setError("");
+            setCustomerError(false);
             setImportNote("");
             setSerialStatus({});
             serialCheckSeq.current = {};
@@ -19835,6 +22084,7 @@ const NAV: NavSection[] = [
     icon: "⚙",
     items: [
       { id: "stock_serials", label: "Stock & Serials", icon: "🔢" },
+      { id: "bin", label: "Bin", icon: "🗑" },
       { id: "audit_log", label: "Audit Log", icon: "🔍" },
       { id: "ledger", label: "Ledger", icon: "📒" },
       { id: "downloads", label: "Downloads", icon: "↧" },
@@ -22244,17 +24494,23 @@ FILE: ./src/lib/pdfToImage.ts
 // Converts the first page of a PDF file into a PNG File object,
 // so it can be fed into image-only vision APIs (Groq, Claude).
 
-import * as pdfjsLib from "pdfjs-dist";
-
-// pdf.js needs a worker script. Point it at the CDN build matching
-// whatever version got installed — avoids bundling/webpack worker headaches.
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+// IMPORTANT: pdfjs-dist touches browser-only globals (DOMMatrix) at module
+// load time. A static top-level import gets pulled into the SSR bundle via
+// GroqSaleScanner -> RecordSale -> page.tsx, and crashes on the server with
+// "DOMMatrix is not defined". Load it dynamically, only when actually
+// needed, so it never gets evaluated outside the browser.
+async function getPdfjs() {
+  const pdfjsLib = await import("pdfjs-dist");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`;
+  return pdfjsLib;
+}
 
 export async function pdfFileToImageFile(
   file: File,
   opts: { scale?: number; pageNumber?: number } = {},
 ): Promise<File> {
   const { scale = 2.5, pageNumber = 1 } = opts;
+  const pdfjsLib = await getPdfjs();
 
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -22274,7 +24530,7 @@ export async function pdfFileToImageFile(
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Could not get canvas context");
 
-  await page.render({ canvasContext: ctx, viewport }).promise;
+  await page.render({ canvasContext: ctx, canvas, viewport }).promise;
 
   const blob: Blob = await new Promise((resolve, reject) => {
     canvas.toBlob((b) => {
@@ -22292,6 +24548,7 @@ export async function pdfFileToImageFile(
 // Returns page count without rendering, so callers can warn/offer a page
 // picker for multi-page PDFs before committing to page 1.
 export async function getPdfPageCount(file: File): Promise<number> {
+  const pdfjsLib = await getPdfjs();
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   return pdf.numPages;
@@ -22299,6 +24556,6 @@ export async function getPdfPageCount(file: File): Promise<number> {
 
 
 ========================================
-  TOTAL FILES: 53
-  TOTAL LINES:    22299
+  TOTAL FILES: 54
+  TOTAL LINES:    24556
 ========================================
