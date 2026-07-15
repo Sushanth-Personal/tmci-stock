@@ -391,12 +391,14 @@ function InvoiceDetail({
           <>
             <div
               style={{
-                background: "#3a3d45",
+                background: "#ffffff",
                 borderRadius: 8,
                 padding: 20,
                 display: "flex",
                 justifyContent: "center",
                 overflowX: "auto",
+                overflowY: "auto",
+                maxHeight: "calc(100vh - 220px)",
               }}
             >
               <InvoicePaper invoice={invoice} />

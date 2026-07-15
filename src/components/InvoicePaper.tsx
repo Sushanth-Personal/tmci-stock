@@ -109,7 +109,8 @@ function twoDigitsToWords(n: number): string {
   if (n < 20) return ONES[n];
   const t = Math.floor(n / 10);
   const o = n % 10;
-  return TENS[t] + (o ? " " + ONES[o] : "");
+  // Hyphenated like the actual invoice text: "Sixty-One", "Ninety-Two"
+  return TENS[t] + (o ? "-" + ONES[o] : "");
 }
 
 function threeDigitsToWords(n: number): string {
@@ -179,18 +180,38 @@ export default function InvoicePaper({
   return (
     <div className="ip-paper">
       <style>{`
+        /* NOTE: every rule below uses !important because the app's global
+           dark-theme styles (table, th, td, backgrounds, text colors) bleed
+           into this component otherwise — the paper must stay white with
+           dark text regardless of the surrounding theme. */
         .ip-paper {
-          background: #ffffff; color: #1a1a1a; width: 100%; max-width: 860px;
-          margin: 0 auto;
-          box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+          background: #ffffff !important; color: #1a1a1a !important;
+          width: 100%; max-width: 860px; margin: 0 auto;
           font-family: Arial, Helvetica, sans-serif;
           padding: 34px 40px;
           font-size: 12.5px;
           line-height: 1.5;
         }
+        .ip-paper * { color: #1a1a1a; }
+        .ip-inner { border: 1.5px solid #333; }
+        .ip-header-block { display: flex; justify-content: space-between; align-items: flex-start; padding: 14px 16px; }
+        .ip-meta-block {
+          display: grid; grid-template-columns: 55% 45%;
+          border-top: 1.5px solid #333; border-bottom: 1.5px solid #333;
+        }
+        .ip-meta-left { padding: 8px 12px; }
+        .ip-meta-right { padding: 8px 12px; border-left: 1.5px solid #333; }
+        .ip-meta-row { display: flex; font-size: 12.5px; padding: 1.5px 0; }
+        .ip-meta-row .k { width: 120px; flex-shrink: 0; }
+        .ip-meta-row .v { font-weight: 700; }
+        .ip-section { padding: 10px 16px; }
         .ip-hr { border: none; border-top: 1.5px solid #333; margin: 14px 0; }
-        .ip-meta-table { border-collapse: collapse; width: 100%; }
-        .ip-meta-table td { border: none; padding: 2px 0; font-size: 12.5px; vertical-align: top; }
+        .ip-meta-table { border-collapse: collapse !important; width: 100% !important; }
+        .ip-meta-table td {
+          border: none !important; padding: 2px 0 !important;
+          font-size: 12.5px !important; vertical-align: top !important;
+          background: transparent !important; color: #1a1a1a !important;
+        }
         .ip-meta-label { font-weight: 700; width: 130px; }
         .ip-billship {
           display: grid; grid-template-columns: 1fr 1fr;
@@ -199,262 +220,292 @@ export default function InvoicePaper({
         .ip-billship-col { padding: 8px 12px; }
         .ip-billship-col + .ip-billship-col { border-left: 1px solid #333; }
         .ip-billship-label {
-          font-weight: 700; font-size: 12px; background: #f2f2f2;
+          font-weight: 700; font-size: 12px; background: #f2f2f2 !important;
           margin: -8px -12px 8px -12px; padding: 6px 12px;
           border-bottom: 1px solid #333;
         }
-        .ip-items-table { border-collapse: collapse; width: 100%; }
+        .ip-items-table { border-collapse: collapse !important; width: 100% !important; }
         .ip-items-table th, .ip-items-table td {
-          border: 1px solid #333; padding: 6px 8px; font-size: 12px; vertical-align: top;
+          border: 1px solid #333 !important; padding: 6px 8px !important;
+          font-size: 12px !important; vertical-align: top !important;
+          color: #1a1a1a !important;
         }
-        .ip-items-table th { font-weight: 700; text-align: left; }
-        .ip-totals-table { border-collapse: collapse; width: 100%; }
-        .ip-totals-table td { border: none; padding: 3px 0; font-size: 12.5px; }
+        .ip-items-table th {
+          font-weight: 700 !important; text-align: left !important;
+          background: #ffffff !important;
+          text-transform: none !important; letter-spacing: 0 !important;
+        }
+        .ip-items-table td { background: #ffffff !important; }
+        .ip-items-table tbody tr:hover td { background: #ffffff !important; }
+        .ip-totals-table { border-collapse: collapse !important; width: 100% !important; }
+        .ip-totals-table td {
+          border: none !important; padding: 3px 0 !important;
+          font-size: 12.5px !important; background: transparent !important;
+          color: #1a1a1a !important;
+        }
         .ip-totals-table tr.ip-total-row td {
-          border-top: 1.5px solid #333; padding-top: 6px; font-weight: 700; font-size: 13.5px;
+          border-top: 1.5px solid #333 !important; padding-top: 6px !important;
+          font-weight: 700 !important; font-size: 13.5px !important;
         }
       `}</style>
 
-      {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-        }}
-      >
-        <div style={{ display: "flex", gap: 14 }}>
+      <div className="ip-inner">
+        {/* Header */}
+        <div className="ip-header-block">
+          <div style={{ display: "flex", gap: 14 }}>
+            <div
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: "50%",
+                border: "3px solid #1a2a6c",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontWeight: 700,
+                fontSize: 11,
+                color: "#1a2a6c",
+                flexShrink: 0,
+              }}
+            >
+              TMCI
+            </div>
+            <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
+                {COMPANY.name}
+              </div>
+              <div>Company ID : {COMPANY.companyId}</div>
+              {COMPANY.addressLines.map((l, i) => (
+                <div key={i}>{l}</div>
+              ))}
+              <div>{COMPANY.phone}</div>
+              <div>{COMPANY.email}</div>
+              <div>{COMPANY.website}</div>
+              <div>GSTIN: {COMPANY.gstin}</div>
+            </div>
+          </div>
           <div
             style={{
-              width: 56,
-              height: 56,
-              borderRadius: "50%",
-              border: "3px solid #1a2a6c",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
+              fontSize: 28,
               fontWeight: 700,
-              fontSize: 11,
-              color: "#1a2a6c",
-              flexShrink: 0,
+              letterSpacing: "0.05em",
+              color: "#1a1a1a",
             }}
           >
-            TMCI
+            INVOICE
           </div>
-          <div style={{ fontSize: 12, lineHeight: 1.5 }}>
-            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
-              {COMPANY.name}
+        </div>
+
+        {/* Invoice meta — bordered two-pane row exactly like the PDF:
+          left pane has the invoice fields with BOLD values, right pane has
+          Place Of Supply. */}
+        <div className="ip-meta-block">
+          <div className="ip-meta-left">
+            <div className="ip-meta-row">
+              <span className="k">Invoice Number</span>
+              <span className="v">: {invoice.invoice_number}</span>
             </div>
-            <div>Company ID : {COMPANY.companyId}</div>
-            {COMPANY.addressLines.map((l, i) => (
-              <div key={i}>{l}</div>
-            ))}
-            <div>{COMPANY.phone}</div>
-            <div>{COMPANY.email}</div>
-            <div>{COMPANY.website}</div>
-            <div>GSTIN: {COMPANY.gstin}</div>
-          </div>
-        </div>
-        <div
-          style={{
-            fontSize: 28,
-            fontWeight: 700,
-            letterSpacing: "0.05em",
-            color: "#1a1a1a",
-          }}
-        >
-          INVOICE
-        </div>
-      </div>
-
-      <hr className="ip-hr" />
-
-      {/* Invoice meta */}
-      <table className="ip-meta-table">
-        <tbody>
-          <tr>
-            <td className="ip-meta-label">Invoice Number</td>
-            <td>: {invoice.invoice_number}</td>
-            <td className="ip-meta-label" style={{ width: 110 }}>
-              Place Of Supply
-            </td>
-            <td>: {COMPANY.gstState}</td>
-          </tr>
-          <tr>
-            <td className="ip-meta-label">Invoice Date</td>
-            <td>: {fmtDateDMY(invoice.invoice_date)}</td>
-            <td />
-            <td />
-          </tr>
-          <tr>
-            <td className="ip-meta-label">Terms</td>
-            <td>: Due on Receipt</td>
-            <td />
-            <td />
-          </tr>
-          <tr>
-            <td className="ip-meta-label">Due Date</td>
-            <td>: {fmtDateDMY(invoice.due_date)}</td>
-            <td />
-            <td />
-          </tr>
-        </tbody>
-      </table>
-
-      <hr className="ip-hr" />
-
-      {/* Bill To / Ship To */}
-      <div className="ip-billship">
-        <div className="ip-billship-col">
-          <div className="ip-billship-label">Bill To</div>
-          <div style={{ fontWeight: 700, color: "#1a4fa0" }}>
-            {customer?.display_name || customer?.name}
-          </div>
-          <div>{billTo}</div>
-          <div>India</div>
-          {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
-        </div>
-        <div className="ip-billship-col">
-          <div className="ip-billship-label">Ship To</div>
-          <div style={{ fontWeight: 700 }}>
-            {customer?.display_name || customer?.name}
-          </div>
-          <div>{billTo}</div>
-          <div>India</div>
-          {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
-        </div>
-      </div>
-
-      {/* Subject */}
-      {invoice.notes && (
-        <div style={{ fontSize: 12, margin: "14px 0" }}>
-          <strong>Subject :</strong>
-          <br />
-          {invoice.notes}
-        </div>
-      )}
-
-      {/* Line items */}
-      <table className="ip-items-table" style={{ marginTop: 12 }}>
-        <thead>
-          <tr>
-            <th style={{ width: 34 }}>S.No</th>
-            <th>Item &amp; Description</th>
-            <th style={{ width: 80 }}>HSN / SAC</th>
-            <th style={{ width: 50, textAlign: "right" }}>Qty</th>
-            <th style={{ width: 80, textAlign: "right" }}>Rate</th>
-            {intraState ? (
-              <>
-                <th style={{ width: 80, textAlign: "right" }}>CGST</th>
-                <th style={{ width: 80, textAlign: "right" }}>SGST</th>
-              </>
-            ) : (
-              <th style={{ width: 90, textAlign: "right" }}>IGST</th>
+            <div className="ip-meta-row">
+              <span className="k">Invoice Date</span>
+              <span className="v">: {fmtDateDMY(invoice.invoice_date)}</span>
+            </div>
+            <div className="ip-meta-row">
+              <span className="k">Terms</span>
+              <span className="v">: Due on Receipt</span>
+            </div>
+            <div className="ip-meta-row">
+              <span className="k">Due Date</span>
+              <span className="v">: {fmtDateDMY(invoice.due_date)}</span>
+            </div>
+            {(invoice as any).po_number && (
+              <div className="ip-meta-row">
+                <span className="k">P.O. Number</span>
+                <span className="v">: {(invoice as any).po_number}</span>
+              </div>
             )}
-            <th style={{ width: 90, textAlign: "right" }}>Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          {invoice.line_items.map((l, i) => {
-            const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
-            const lineAmount = eff * l.qty;
-            const lineTax = (lineAmount * invoice.gst_rate) / 100;
-            const half = lineTax / 2;
-            return (
-              <tr key={i}>
-                <td>{i + 1}</td>
-                <td>
-                  <div style={{ fontWeight: 700 }}>{l.model}</div>
-                  {l.description && <div>{l.description}</div>}
-                  {l.serialNumbers?.filter(Boolean).map((sn, si) => (
-                    <div key={si}>S/N:{sn}</div>
-                  ))}
-                </td>
-                <td>{l.hsn}</td>
-                <td style={{ textAlign: "right" }}>{l.qty.toFixed(2)}</td>
-                <td style={{ textAlign: "right" }}>{fmt2(eff)}</td>
+          </div>
+          <div className="ip-meta-right">
+            <div className="ip-meta-row">
+              <span className="k">Place Of Supply</span>
+              <span className="v">: {COMPANY.gstState}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Bill To / Ship To */}
+        <div
+          className="ip-billship"
+          style={{ border: "none", borderBottom: "1.5px solid #333" }}
+        >
+          <div className="ip-billship-col">
+            <div className="ip-billship-label">Bill To</div>
+            <div style={{ fontWeight: 700, color: "#1a4fa0" }}>
+              {customer?.display_name || customer?.name}
+            </div>
+            <div>{billTo}</div>
+            <div>India</div>
+            {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+          </div>
+          <div className="ip-billship-col">
+            <div className="ip-billship-label">Ship To</div>
+            <div style={{ fontWeight: 700 }}>
+              {customer?.display_name || customer?.name}
+            </div>
+            <div>{billTo}</div>
+            <div>India</div>
+            {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+          </div>
+        </div>
+
+        {/* Subject */}
+        <div className="ip-section">
+          {invoice.notes && (
+            <div style={{ fontSize: 12, marginBottom: 12 }}>
+              Subject :
+              <br />
+              {invoice.notes}
+            </div>
+          )}
+
+          {/* Line items */}
+          <table className="ip-items-table">
+            <thead>
+              <tr>
+                <th style={{ width: 34 }}>S.No</th>
+                <th>Item &amp; Description</th>
+                <th style={{ width: 80 }}>HSN / SAC</th>
+                <th style={{ width: 50, textAlign: "right" }}>Qty</th>
+                <th style={{ width: 80, textAlign: "right" }}>Rate</th>
                 {intraState ? (
                   <>
-                    <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
-                    <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                    <th style={{ width: 80, textAlign: "right" }}>CGST</th>
+                    <th style={{ width: 80, textAlign: "right" }}>SGST</th>
                   </>
                 ) : (
-                  <td style={{ textAlign: "right" }}>{fmt2(lineTax)}</td>
+                  <th style={{ width: 90, textAlign: "right" }}>IGST</th>
                 )}
-                <td style={{ textAlign: "right" }}>{fmt2(lineAmount)}</td>
+                <th style={{ width: 90, textAlign: "right" }}>Amount</th>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
-
-      {/* Totals + amount in words + bank details */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          marginTop: 16,
-          gap: 20,
-        }}
-      >
-        <div style={{ fontSize: 12, flex: 1 }}>
-          <div style={{ marginBottom: 10 }}>
-            <strong>Total In Words</strong>
-            <br />
-            <em>{amountInWords(invoice.total)}</em>
-          </div>
-          <div>Bank Name: {COMPANY.bank.name}</div>
-          <div>Account Number: {COMPANY.bank.account}</div>
-          <div>Branch Name: {COMPANY.bank.branch}</div>
-          <div>IFSC Code: {COMPANY.bank.ifsc}</div>
-        </div>
-
-        <div style={{ width: 260, fontSize: 12 }}>
-          <table className="ip-totals-table">
+            </thead>
             <tbody>
-              <tr>
-                <td>Sub Total</td>
-                <td style={{ textAlign: "right" }}>{fmt2(invoice.subtotal)}</td>
-              </tr>
-              {intraState ? (
-                <>
-                  <tr>
-                    <td>CGST ({halfRate}%)</td>
-                    <td style={{ textAlign: "right" }}>
-                      {fmt2(invoice.gst_amount / 2)}
+              {invoice.line_items.map((l, i) => {
+                const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
+                const lineAmount = eff * l.qty;
+                const lineTax = (lineAmount * invoice.gst_rate) / 100;
+                const half = lineTax / 2;
+                return (
+                  <tr key={i}>
+                    <td>{i + 1}</td>
+                    <td>
+                      <div>
+                        {/^fluke/i.test(l.model) ? l.model : `Fluke ${l.model}`}
+                      </div>
+                      {l.description && <div>{l.description}</div>}
+                      {(l.serialNumbers?.filter(Boolean).length ?? 0) > 0 && (
+                        <div>
+                          S/N: {l.serialNumbers.filter(Boolean).join(" & ")}
+                        </div>
+                      )}
                     </td>
-                  </tr>
-                  <tr>
-                    <td>SGST ({halfRate}%)</td>
+                    <td>{l.hsn || "—"}</td>{" "}
                     <td style={{ textAlign: "right" }}>
-                      {fmt2(invoice.gst_amount / 2)}
+                      {l.qty.toFixed(2)}
+                      <br />
+                      pcs
                     </td>
+                    <td style={{ textAlign: "right" }}>{fmt2(eff)}</td>
+                    {intraState ? (
+                      <>
+                        <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                        <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                      </>
+                    ) : (
+                      <td style={{ textAlign: "right" }}>{fmt2(lineTax)}</td>
+                    )}
+                    <td style={{ textAlign: "right" }}>{fmt2(lineAmount)}</td>
                   </tr>
-                </>
-              ) : (
-                <tr>
-                  <td>IGST ({invoice.gst_rate}%)</td>
-                  <td style={{ textAlign: "right" }}>
-                    {fmt2(invoice.gst_amount)}
-                  </td>
-                </tr>
-              )}
-              <tr className="ip-total-row">
-                <td>Total</td>
-                <td style={{ textAlign: "right" }}>Rs.{fmt2(invoice.total)}</td>
-              </tr>
+                );
+              })}
             </tbody>
           </table>
+
+          {/* Totals + amount in words + bank details */}
           <div
             style={{
-              marginTop: 60,
-              borderTop: "1px solid #1a1a1a",
-              paddingTop: 4,
-              textAlign: "center",
-              fontSize: 11,
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: 16,
+              gap: 20,
             }}
           >
-            Authorized Signatory
+            <div style={{ fontSize: 12, flex: 1 }}>
+              <div style={{ marginBottom: 10 }}>
+                <strong>Total In Words</strong>
+                <br />
+                <em>{amountInWords(invoice.total)}</em>
+              </div>
+              <div>Bank Name: {COMPANY.bank.name}</div>
+              <div>Account Number: {COMPANY.bank.account}</div>
+              <div>Branch Name: {COMPANY.bank.branch}</div>
+              <div>IFSC Code: {COMPANY.bank.ifsc}</div>
+            </div>
+
+            <div style={{ width: 260, fontSize: 12 }}>
+              <table className="ip-totals-table">
+                <tbody>
+                  <tr>
+                    <td>Sub Total</td>
+                    <td style={{ textAlign: "right" }}>
+                      {fmt2(invoice.subtotal)}
+                    </td>
+                  </tr>
+                  {intraState ? (
+                    <>
+                      <tr>
+                        <td>
+                          CGST{halfRate} ({halfRate}%)
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {fmt2(invoice.gst_amount / 2)}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>
+                          SGST{halfRate} ({halfRate}%)
+                        </td>
+                        <td style={{ textAlign: "right" }}>
+                          {fmt2(invoice.gst_amount / 2)}
+                        </td>
+                      </tr>
+                    </>
+                  ) : (
+                    <tr>
+                      <td>IGST ({invoice.gst_rate}%)</td>
+                      <td style={{ textAlign: "right" }}>
+                        {fmt2(invoice.gst_amount)}
+                      </td>
+                    </tr>
+                  )}
+                  <tr className="ip-total-row">
+                    <td>Total</td>
+                    <td style={{ textAlign: "right" }}>
+                      Rs.{fmt2(invoice.total)}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div
+                style={{
+                  marginTop: 60,
+                  borderTop: "1px solid #1a1a1a",
+                  paddingTop: 4,
+                  textAlign: "center",
+                  fontSize: 11,
+                }}
+              >
+                Authorized Signatory
+              </div>
+            </div>
           </div>
         </div>
       </div>
