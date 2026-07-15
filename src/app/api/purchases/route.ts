@@ -72,6 +72,7 @@ export async function GET() {
       poOrInvoice: r.po_invoice,
       status: r.status,
       costPrice: r.cost_price ?? null,
+      serialNumbers: Array.isArray(r.serial_numbers) ? r.serial_numbers : [],
     }));
 
     return NextResponse.json({ purchases });
@@ -168,6 +169,7 @@ export async function POST(req: Request) {
       po_invoice: poOrInvoice ?? "",
       status: status ?? "Received",
       cost_price: resolvedUnitPrice,
+      serial_numbers: resolvedSerials,
     });
     if (txnErr) throw txnErr;
 

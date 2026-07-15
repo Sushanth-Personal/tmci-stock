@@ -2,9 +2,10 @@
 // src/components/Ledger.tsx
 // Stock Ledger — source of truth for what came in and what went out.
 // Two tabs: Purchased (IN) and Sold (OUT)
-// Each row = one model, one movement.
+// Each row = one model, one movement. Click a row to expand and see its
+// recorded serial numbers (if any were captured for that transaction).
 
-import { useState, useMemo } from "react";
+import React, { useState, useMemo } from "react";
 
 interface Props {
   sales: any[];
@@ -36,6 +37,8 @@ export default function Ledger({ sales, purchases }: Props) {
   const [to, setTo] = useState("");
   const [allTime, setAllTime] = useState(true);
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  // Accordion — only one row's serials expanded at a time. Keyed by txnId.
+  const [expandedTxn, setExpandedTxn] = useState<string | null>(null);
 
   const filter = (rows: any[]) => {
     let r = rows.filter((x) => x.model || x.itemCode);
@@ -94,6 +97,69 @@ export default function Ledger({ sales, purchases }: Props) {
   };
   const hasFilters = search || party || !allTime;
 
+  const toggleExpand = (txnId: string) => {
+    setExpandedTxn((prev) => (prev === txnId ? null : txnId));
+  };
+
+  // Renders the serial chips (or an explanatory note) for the expanded row.
+  const SerialDetail = ({ row }: { row: any }) => {
+    const serials: string[] = Array.isArray(row.serialNumbers)
+      ? row.serialNumbers.filter(Boolean)
+      : [];
+    return (
+      <div
+        style={{
+          padding: "10px 14px",
+          background: "rgba(255,255,255,0.02)",
+          borderBottom: "1px solid var(--border)",
+        }}
+      >
+        {serials.length === 0 ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--text-muted)",
+              fontStyle: "italic",
+            }}
+          >
+            No serial numbers recorded for this transaction.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div
+              style={{
+                fontSize: 10,
+                color: "var(--text-muted)",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+              }}
+            >
+              Serial number{serials.length !== 1 ? "s" : ""} ({serials.length})
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {serials.map((sn, i) => (
+                <span
+                  key={i}
+                  style={{
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    background: "var(--bg-input)",
+                    border: "1px solid var(--border)",
+                    padding: "3px 9px",
+                    borderRadius: 5,
+                    color: "var(--text-dim)",
+                  }}
+                >
+                  {sn}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <style>{`
@@ -106,7 +172,9 @@ export default function Ledger({ sales, purchases }: Props) {
         .ledger-tab.sold.on   { border-bottom-color: var(--accent-green); }
         .ledger-tab.purchased.on { border-bottom-color: var(--accent); }
         .ledger-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
-        .ledger-scroll table { min-width: 700px; }
+        .ledger-scroll table { min-width: 760px; }
+        .ledger-row { cursor: pointer; transition: background 0.1s; }
+        .ledger-row:hover td { background: rgba(255,255,255,0.02); }
         @media (max-width: 720px) {
           .ledger-filter-row { flex-direction: column !important; }
           .ledger-filter-row input, .ledger-filter-row select { width: 100% !important; }
@@ -117,7 +185,10 @@ export default function Ledger({ sales, purchases }: Props) {
       <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
         <div
           className={`ledger-tab sold${tab === "sold" ? " on" : ""}`}
-          onClick={() => setTab("sold")}
+          onClick={() => {
+            setTab("sold");
+            setExpandedTxn(null);
+          }}
         >
           ↑ Sold
           <span
@@ -137,7 +208,10 @@ export default function Ledger({ sales, purchases }: Props) {
         </div>
         <div
           className={`ledger-tab purchased${tab === "purchased" ? " on" : ""}`}
-          onClick={() => setTab("purchased")}
+          onClick={() => {
+            setTab("purchased");
+            setExpandedTxn(null);
+          }}
         >
           ↓ Purchased
           <span
@@ -326,6 +400,7 @@ export default function Ledger({ sales, purchases }: Props) {
           <table>
             <thead>
               <tr>
+                <th style={{ width: 20 }}></th>
                 <th>Date</th>
                 <th>Model</th>
                 <th>Location</th>
@@ -342,7 +417,7 @@ export default function Ledger({ sales, purchases }: Props) {
               {rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={10}
+                    colSpan={11}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -354,73 +429,106 @@ export default function Ledger({ sales, purchases }: Props) {
                 </tr>
               ) : (
                 rows.map((r, i) => {
+                  const key = r.txnId ?? String(i);
+                  const isOpen = expandedTxn === key;
                   const sp = Number(r.unitPrice ?? r.unitSalePrice ?? 0);
                   const cost = Number(r.costPrice ?? 0);
                   const tot = Number(r.total ?? 0);
                   const margin =
                     sp > 0 && cost > 0 ? ((sp - cost) / sp) * 100 : null;
+                  const hasSerials =
+                    Array.isArray(r.serialNumbers) &&
+                    r.serialNumbers.filter(Boolean).length > 0;
                   return (
-                    <tr key={r.txnId ?? i}>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          whiteSpace: "nowrap",
-                        }}
+                    <React.Fragment key={key}>
+                      <tr
+                        className="ledger-row"
+                        onClick={() => toggleExpand(key)}
                       >
-                        {fmtDate(r.date)}
-                      </td>
-                      <td style={{ fontWeight: 500 }}>{r.model || "—"}</td>
-                      <td style={{ color: "var(--text-muted)" }}>
-                        {r.location || "—"}
-                      </td>
-                      <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
-                      <td style={{ textAlign: "right" }}>{fmtRs(sp)}</td>
-                      <td style={{ textAlign: "right", fontWeight: 500 }}>
-                        {fmtRs(tot)}
-                      </td>
-                      <td
-                        style={{
-                          textAlign: "right",
-                          color: "var(--text-muted)",
-                        }}
-                      >
-                        {fmtRs(cost)}
-                      </td>
-                      <td
-                        style={{
-                          textAlign: "right",
-                          fontWeight: 500,
-                          color:
-                            margin === null
-                              ? "var(--text-muted)"
-                              : margin > 0
-                                ? "var(--accent-green)"
-                                : "var(--accent-red)",
-                        }}
-                      >
-                        {margin === null ? "—" : `${margin.toFixed(1)}%`}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          maxWidth: 200,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.party ?? r.customer ?? "—"}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--accent)",
-                          fontSize: 11,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.poOrInvoice ?? "—"}
-                      </td>
-                    </tr>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {isOpen ? "▾" : "▸"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {fmtDate(r.date)}
+                        </td>
+                        <td style={{ fontWeight: 500 }}>
+                          {r.model || "—"}
+                          {hasSerials && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 9,
+                                color: "var(--text-muted)",
+                              }}
+                            >
+                              🔢
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {r.location || "—"}
+                        </td>
+                        <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
+                        <td style={{ textAlign: "right" }}>{fmtRs(sp)}</td>
+                        <td style={{ textAlign: "right", fontWeight: 500 }}>
+                          {fmtRs(tot)}
+                        </td>
+                        <td
+                          style={{
+                            textAlign: "right",
+                            color: "var(--text-muted)",
+                          }}
+                        >
+                          {fmtRs(cost)}
+                        </td>
+                        <td
+                          style={{
+                            textAlign: "right",
+                            fontWeight: 500,
+                            color:
+                              margin === null
+                                ? "var(--text-muted)"
+                                : margin > 0
+                                  ? "var(--accent-green)"
+                                  : "var(--accent-red)",
+                          }}
+                        >
+                          {margin === null ? "—" : `${margin.toFixed(1)}%`}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            maxWidth: 200,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.party ?? r.customer ?? "—"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--accent)",
+                            fontSize: 11,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.poOrInvoice ?? "—"}
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={11} style={{ padding: 0 }}>
+                            <SerialDetail row={r} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })
               )}
@@ -430,6 +538,7 @@ export default function Ledger({ sales, purchases }: Props) {
           <table>
             <thead>
               <tr>
+                <th style={{ width: 20 }}></th>
                 <th>Date</th>
                 <th>Model</th>
                 <th>Location</th>
@@ -444,7 +553,7 @@ export default function Ledger({ sales, purchases }: Props) {
               {rows.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={8}
+                    colSpan={9}
                     style={{
                       textAlign: "center",
                       color: "var(--text-muted)",
@@ -456,48 +565,81 @@ export default function Ledger({ sales, purchases }: Props) {
                 </tr>
               ) : (
                 rows.map((r, i) => {
+                  const key = r.txnId ?? String(i);
+                  const isOpen = expandedTxn === key;
                   const up = Number(r.unitPrice ?? r.unitPurchasePrice ?? 0);
                   const tot = Number(r.total ?? 0);
+                  const hasSerials =
+                    Array.isArray(r.serialNumbers) &&
+                    r.serialNumbers.filter(Boolean).length > 0;
                   return (
-                    <tr key={r.txnId ?? i}>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          whiteSpace: "nowrap",
-                        }}
+                    <React.Fragment key={key}>
+                      <tr
+                        className="ledger-row"
+                        onClick={() => toggleExpand(key)}
                       >
-                        {fmtDate(r.date)}
-                      </td>
-                      <td style={{ fontWeight: 500 }}>{r.model || "—"}</td>
-                      <td style={{ color: "var(--text-muted)" }}>
-                        {r.location || "—"}
-                      </td>
-                      <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
-                      <td style={{ textAlign: "right" }}>{fmtRs(up)}</td>
-                      <td style={{ textAlign: "right", fontWeight: 500 }}>
-                        {fmtRs(tot)}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          maxWidth: 200,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.party ?? r.vendor ?? r.supplier ?? "—"}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--accent)",
-                          fontSize: 11,
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {r.poOrInvoice ?? "—"}
-                      </td>
-                    </tr>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {isOpen ? "▾" : "▸"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {fmtDate(r.date)}
+                        </td>
+                        <td style={{ fontWeight: 500 }}>
+                          {r.model || "—"}
+                          {hasSerials && (
+                            <span
+                              style={{
+                                marginLeft: 6,
+                                fontSize: 9,
+                                color: "var(--text-muted)",
+                              }}
+                            >
+                              🔢
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ color: "var(--text-muted)" }}>
+                          {r.location || "—"}
+                        </td>
+                        <td style={{ textAlign: "right" }}>{r.qty ?? "—"}</td>
+                        <td style={{ textAlign: "right" }}>{fmtRs(up)}</td>
+                        <td style={{ textAlign: "right", fontWeight: 500 }}>
+                          {fmtRs(tot)}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--text-muted)",
+                            maxWidth: 200,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.party ?? r.vendor ?? r.supplier ?? "—"}
+                        </td>
+                        <td
+                          style={{
+                            color: "var(--accent)",
+                            fontSize: 11,
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {r.poOrInvoice ?? "—"}
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={9} style={{ padding: 0 }}>
+                            <SerialDetail row={r} />
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })
               )}

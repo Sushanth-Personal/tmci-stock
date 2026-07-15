@@ -24,7 +24,8 @@ export async function GET() {
 
     if (error) throw error;
 
-    // Normalise to camelCase so Transactions.tsx / Dashboard.tsx don't need changes
+    // Normalise to camelCase so Transactions.tsx / Dashboard.tsx / Ledger.tsx
+    // don't need changes to their existing fields.
     const sales = (data ?? []).map((r: any) => ({
       txnId: r.txn_id,
       date: r.date,
@@ -39,6 +40,7 @@ export async function GET() {
       poOrInvoice: r.po_invoice,
       status: r.status,
       costPrice: r.cost_price ?? null,
+      serialNumbers: Array.isArray(r.serial_numbers) ? r.serial_numbers : [],
     }));
 
     return NextResponse.json({ sales });

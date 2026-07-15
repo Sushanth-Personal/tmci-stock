@@ -5,6 +5,7 @@ import React from "react";
 // Left: list panel with search + sort. Right: invoice detail panel.
 
 import { useState, useEffect, useCallback, useMemo } from "react";
+import InvoicePaper from "@/components/InvoicePaper";
 
 interface LineItem {
   model: string;
@@ -35,6 +36,21 @@ interface Invoice {
   status: string;
   dispatched_at: string | null;
   created_at: string;
+}
+
+interface CandidateLot {
+  lot_id: string;
+  date: string;
+  vendor: string;
+  po_invoice: string;
+  remaining_qty: number;
+}
+
+interface UnmatchedSerial {
+  model: string;
+  location: string;
+  serial: string;
+  candidateLots: CandidateLot[];
 }
 
 const fmtDate = (iso: string) =>
@@ -96,15 +112,10 @@ function getCustomerName(inv: Invoice): string {
 
 function matchesSearch(inv: Invoice, q: string): boolean {
   const needle = q.toLowerCase();
-  // Invoice number
   if (inv.invoice_number.toLowerCase().includes(needle)) return true;
-  // Customer name
   if (getCustomerName(inv).toLowerCase().includes(needle)) return true;
-  // Customer GSTIN
   if (inv.customer_snapshot?.gstin?.toLowerCase().includes(needle)) return true;
-  // Notes / subject
   if (inv.notes?.toLowerCase().includes(needle)) return true;
-  // Any product model or description in line items
   if (
     inv.line_items.some(
       (l) =>
@@ -114,7 +125,6 @@ function matchesSearch(inv: Invoice, q: string): boolean {
     )
   )
     return true;
-  // Serial numbers
   if (
     inv.line_items.some((l) =>
       l.serialNumbers?.some((sn) => sn?.toLowerCase().includes(needle)),
@@ -150,6 +160,16 @@ function InvoiceDetail({
   const [confirmUndo, setConfirmUndo] = useState(false);
   const [error, setError] = useState("");
 
+  // ── Retroactive serial → purchase assignment wizard ───────────────────────
+  const [unmatchedSerials, setUnmatchedSerials] = useState<
+    UnmatchedSerial[] | null
+  >(null);
+  const [assignmentMessage, setAssignmentMessage] = useState("");
+  const [serialChoices, setSerialChoices] = useState<Record<string, string>>(
+    {},
+  );
+  const [assignStep, setAssignStep] = useState(0);
+
   const isPending = invoice.status === "pending_dispatch";
   const isDispatched = invoice.status === "dispatched";
   const sm = STATUS_META[invoice.status] ?? STATUS_META.pending_dispatch;
@@ -164,17 +184,30 @@ function InvoiceDetail({
     0,
   );
 
-  const handleDispatch = async () => {
+  const handleDispatch = async (assignments?: Record<string, string>) => {
     setDispatching(true);
     setError("");
     try {
       const r = await fetch(`/api/invoices/${invoice.id}/dispatch`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ dispatched_at: dispatchDate }),
+        body: JSON.stringify({
+          dispatched_at: dispatchDate,
+          serialLotAssignments: assignments ?? serialChoices,
+        }),
       });
       const d = await r.json();
       if (!r.ok) {
+        if (d.needsSerialAssignment) {
+          setUnmatchedSerials(d.unmatchedSerials ?? []);
+          setAssignmentMessage(
+            d.message ||
+              "Some serials don't match a recorded purchase — pick which purchase each came from below.",
+          );
+          setAssignStep(0);
+          setDispatching(false);
+          return;
+        }
         setError(d.error || "Dispatch failed");
         setDispatching(false);
         return;
@@ -246,6 +279,11 @@ function InvoiceDetail({
     }
     setUndoing(false);
   };
+
+  const allAssigned =
+    !unmatchedSerials ||
+    unmatchedSerials.every((u) => !!serialChoices[u.serial]);
+  const wizardActive = !!(unmatchedSerials && unmatchedSerials.length > 0);
 
   return (
     <div
@@ -346,436 +384,491 @@ function InvoiceDetail({
           gap: 12,
         }}
       >
-        {customer && (
-          <div
-            style={{
-              background: "rgba(59,130,246,0.06)",
-              border: "1px solid rgba(59,130,246,0.2)",
-              borderRadius: 8,
-              padding: "10px 12px",
-              fontSize: 12,
-            }}
-          >
-            <div style={{ fontWeight: 600, marginBottom: 3 }}>
-              {customer.display_name || customer.name}
-            </div>
-            {(customer.billing_address || customer.address) && (
-              <div style={{ color: "var(--text-muted)" }}>
-                {[
-                  customer.billing_address || customer.address,
-                  customer.billing_city || customer.city,
-                  customer.billing_state || customer.state,
-                  customer.billing_pincode || customer.pincode,
-                ]
-                  .filter(Boolean)
-                  .join(", ")}
-              </div>
-            )}
+        {/* Hide the normal invoice detail while the serial-assignment
+            wizard is active — same pattern as PendingInvoices.tsx, keeps
+            the wizard as the sole focus instead of a wall of text above it. */}
+        {!wizardActive && (
+          <>
             <div
               style={{
+                background: "#3a3d45",
+                borderRadius: 8,
+                padding: 20,
                 display: "flex",
-                gap: 10,
-                marginTop: 3,
-                flexWrap: "wrap",
+                justifyContent: "center",
+                overflowX: "auto",
               }}
             >
-              {customer.gstin && (
-                <span
+              <InvoicePaper invoice={invoice} />
+            </div>
+
+            {isPending && (
+              <div
+                style={{
+                  background: "rgba(34,197,94,0.06)",
+                  border: "1px solid rgba(34,197,94,0.25)",
+                  borderRadius: 8,
+                  padding: "12px 14px",
+                }}
+              >
+                <div
                   style={{
-                    fontFamily: "monospace",
-                    fontSize: 11,
-                    color: "var(--text-muted)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--accent-green)",
+                    marginBottom: 8,
                   }}
                 >
-                  GSTIN: {customer.gstin}
-                </span>
-              )}
-              {(customer.phone || customer.mobile) && (
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  {customer.phone || customer.mobile}
-                </span>
-              )}
-              {customer.email && (
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  {customer.email}
-                </span>
-              )}
-            </div>
-          </div>
+                  Ready to dispatch?
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    <label
+                      style={{
+                        fontSize: 10,
+                        color: "var(--text-muted)",
+                        display: "block",
+                        marginBottom: 3,
+                      }}
+                    >
+                      Dispatch date
+                    </label>
+                    <input
+                      type="date"
+                      value={dispatchDate}
+                      onChange={(e) => setDispatchDate(e.target.value)}
+                      style={{ width: 160 }}
+                    />
+                  </div>
+                  <button
+                    className="btn-primary"
+                    style={{
+                      fontSize: 12,
+                      background: "var(--accent-green)",
+                      marginTop: 14,
+                    }}
+                    onClick={() => handleDispatch()}
+                    disabled={dispatching}
+                  >
+                    {dispatching ? "Dispatching..." : "Mark as dispatched"}
+                  </button>
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--accent-green)",
+                    opacity: 0.8,
+                    marginTop: 6,
+                  }}
+                >
+                  Deducts{" "}
+                  {invoice.line_items
+                    .map((l) => `${l.qty}x ${l.model}`)
+                    .join(", ")}{" "}
+                  from {invoice.location} via FIFO and logs the sale.
+                </div>
+              </div>
+            )}
+
+            {isDispatched && !confirmUndo && (
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 8,
+                  padding: "10px 12px",
+                  background: "rgba(245,158,11,0.06)",
+                  border: "1px solid rgba(245,158,11,0.25)",
+                  borderRadius: 8,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--text-dim)",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  This invoice is dispatched — stock has been deducted via FIFO.
+                  If it was marked dispatched by mistake, you can undo it: stock
+                  is restored and the invoice returns to Pending Dispatch.
+                </div>
+                <button
+                  className="btn-ghost"
+                  style={{
+                    fontSize: 11,
+                    color: "var(--accent-amber)",
+                    borderColor: "rgba(245,158,11,0.3)",
+                    alignSelf: "flex-start",
+                  }}
+                  onClick={() => setConfirmUndo(true)}
+                >
+                  ↺ Undo dispatch (restore stock)
+                </button>
+              </div>
+            )}
+
+            {confirmUndo && (
+              <div
+                style={{
+                  background: "rgba(245,158,11,0.07)",
+                  border: "1px solid rgba(245,158,11,0.3)",
+                  borderRadius: 8,
+                  padding: "10px 14px",
+                  fontSize: 12,
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: 600,
+                    color: "var(--accent-amber)",
+                    marginBottom: 8,
+                  }}
+                >
+                  Undo this dispatch?
+                </div>
+                <div
+                  style={{
+                    color: "var(--text-muted)",
+                    marginBottom: 10,
+                    lineHeight: 1.6,
+                  }}
+                >
+                  Stock will be added back to the most recent open lot for each
+                  item (or a new lot if none exists — flagged for cost review).
+                  The Sale transactions will be removed, and the invoice returns
+                  to Pending Dispatch so you can fix it and dispatch again.
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="btn-ghost"
+                    style={{ fontSize: 11 }}
+                    onClick={() => setConfirmUndo(false)}
+                  >
+                    Go back
+                  </button>
+                  <button
+                    className="btn-primary"
+                    style={{ fontSize: 11, background: "var(--accent-amber)" }}
+                    onClick={handleUndoDispatch}
+                    disabled={undoing}
+                  >
+                    {undoing ? "Undoing…" : "Yes, undo dispatch"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
-        <div
-          style={{
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            overflow: "hidden",
-          }}
-        >
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Model</th>
-                <th>HSN</th>
-                <th style={{ textAlign: "right" }}>Qty</th>
-                <th style={{ textAlign: "right" }}>Rate</th>
-                <th style={{ textAlign: "right" }}>Disc</th>
-                <th style={{ textAlign: "right" }}>Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {invoice.line_items.map((l, i) => {
-                const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
-                return (
-                  <React.Fragment key={i}>
-                    <tr>
-                      <td style={{ color: "var(--text-muted)" }}>{i + 1}</td>
-                      <td>
-                        <div style={{ fontWeight: 500 }}>{l.model}</div>
-                        {l.description && (
+        {/* ── Match unrecorded serial to a purchase — one at a time ── */}
+        {wizardActive &&
+          (() => {
+            const current = unmatchedSerials![assignStep];
+            const total = unmatchedSerials!.length;
+            const chosen = serialChoices[current.serial];
+            const isLast = assignStep === total - 1;
+            const totalAvailable = current.candidateLots.reduce(
+              (s, l) => s + l.remaining_qty,
+              0,
+            );
+
+            return (
+              <div
+                style={{
+                  background: "rgba(59,130,246,0.06)",
+                  border: "1px solid rgba(59,130,246,0.3)",
+                  borderRadius: 8,
+                  padding: "14px 16px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 14,
+                }}
+              >
+                <div>
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      marginBottom: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: "var(--accent)",
+                      }}
+                    >
+                      Match unrecorded serial to a purchase
+                    </div>
+                    <span
+                      style={{
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: "var(--text-muted)",
+                      }}
+                    >
+                      {assignStep + 1} of {total}
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      height: 6,
+                      borderRadius: 99,
+                      background: "var(--bg-input)",
+                      overflow: "hidden",
+                      marginBottom: 10,
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${((assignStep + 1) / total) * 100}%`,
+                        background: "var(--accent)",
+                        borderRadius: 99,
+                        transition: "width 0.2s ease",
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-muted)",
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    This invoice can't be dispatched until every serial below is
+                    matched to the purchase it actually came from.
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                  {/* Left: the serial that needs matching */}
+                  <div
+                    style={{
+                      width: 220,
+                      flexShrink: 0,
+                      background: "var(--bg-card)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 8,
+                      padding: "14px 12px",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 10,
+                        color: "var(--text-muted)",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.05em",
+                        marginBottom: 6,
+                      }}
+                    >
+                      Serial number
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: "monospace",
+                        fontSize: 16,
+                        fontWeight: 700,
+                        color: "var(--accent-amber)",
+                        lineHeight: 1.3,
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {current.serial}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: "var(--text-dim)",
+                        marginTop: 6,
+                      }}
+                    >
+                      {current.model}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        marginTop: 10,
+                        lineHeight: 1.6,
+                      }}
+                    >
+                      Not found in stock records — but{" "}
+                      <strong style={{ color: "var(--accent-green)" }}>
+                        {totalAvailable} unit(s)
+                      </strong>{" "}
+                      of this model are available.
+                    </div>
+                  </div>
+
+                  {/* Right: candidate purchases */}
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 260,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-muted)",
+                        marginBottom: 2,
+                      }}
+                    >
+                      Which purchase did this unit come from?
+                    </div>
+                    {current.candidateLots.length === 0 ? (
+                      <div style={{ fontSize: 12, color: "var(--accent-red)" }}>
+                        No open purchase found for this model — record a
+                        Purchase for it first.
+                      </div>
+                    ) : (
+                      current.candidateLots.map((l) => {
+                        const isChosen = chosen === l.lot_id;
+                        return (
                           <div
-                            style={{ fontSize: 10, color: "var(--text-muted)" }}
-                          >
-                            {l.description}
-                          </div>
-                        )}
-                        {l.warranty && (
-                          <div
-                            style={{ fontSize: 10, color: "var(--text-muted)" }}
-                          >
-                            Warranty: {l.warranty}
-                          </div>
-                        )}
-                      </td>
-                      <td
-                        style={{
-                          color: "var(--text-muted)",
-                          fontFamily: "monospace",
-                        }}
-                      >
-                        {l.hsn}
-                      </td>
-                      <td style={{ textAlign: "right" }}>{l.qty}</td>
-                      <td style={{ textAlign: "right" }}>
-                        {fmtMoney(l.unitSalePrice)}
-                        {l.discount > 0 && (
-                          <div
-                            style={{
-                              fontSize: 10,
-                              color: "var(--accent-amber)",
-                            }}
-                          >
-                            -&gt; {fmtMoney(eff)}
-                          </div>
-                        )}
-                      </td>
-                      <td
-                        style={{
-                          textAlign: "right",
-                          color:
-                            l.discount > 0
-                              ? "var(--accent-amber)"
-                              : "var(--text-muted)",
-                        }}
-                      >
-                        {l.discount > 0 ? `${l.discount}%` : "-"}
-                      </td>
-                      <td style={{ textAlign: "right", fontWeight: 500 }}>
-                        {fmtMoney(eff * l.qty)}
-                      </td>
-                    </tr>
-                    {l.serialNumbers?.filter(Boolean).length > 0 && (
-                      <tr
-                        key={`sn-${i}`}
-                        style={{ background: "rgba(255,255,255,0.01)" }}
-                      >
-                        <td />
-                        <td colSpan={6}>
-                          <div
+                            key={l.lot_id}
+                            onClick={() =>
+                              setSerialChoices((prev) => ({
+                                ...prev,
+                                [current.serial]: l.lot_id,
+                              }))
+                            }
                             style={{
                               display: "flex",
-                              gap: 6,
-                              flexWrap: "wrap",
-                              paddingBottom: 4,
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: 10,
+                              padding: "10px 12px",
+                              borderRadius: 6,
+                              border: isChosen
+                                ? "1.5px solid var(--accent)"
+                                : "1px solid var(--border)",
+                              background: isChosen
+                                ? "rgba(59,130,246,0.1)"
+                                : "var(--bg-input)",
+                              cursor: "pointer",
                             }}
                           >
-                            {l.serialNumbers.filter(Boolean).map((sn, si) => (
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                              }}
+                            >
                               <span
-                                key={si}
                                 style={{
-                                  fontSize: 10,
-                                  fontFamily: "monospace",
-                                  background: "var(--bg-input)",
-                                  padding: "1px 6px",
-                                  borderRadius: 4,
-                                  color: "var(--text-muted)",
+                                  width: 16,
+                                  height: 16,
+                                  borderRadius: "50%",
+                                  border: `1.5px solid ${isChosen ? "var(--accent)" : "var(--text-muted)"}`,
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  flexShrink: 0,
                                 }}
                               >
-                                S/N {si + 1}: {sn}
+                                {isChosen && (
+                                  <span
+                                    style={{
+                                      width: 8,
+                                      height: 8,
+                                      borderRadius: "50%",
+                                      background: "var(--accent)",
+                                    }}
+                                  />
+                                )}
                               </span>
-                            ))}
+                              <div>
+                                <div style={{ fontSize: 12, fontWeight: 500 }}>
+                                  Purchased {fmtDate(l.date)} from{" "}
+                                  {l.vendor || "unknown vendor"}
+                                </div>
+                                <div
+                                  style={{
+                                    fontSize: 10,
+                                    color: "var(--text-muted)",
+                                    marginTop: 1,
+                                  }}
+                                >
+                                  Invoice/PO {l.po_invoice || "—"}
+                                </div>
+                              </div>
+                            </div>
+                            <span
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 600,
+                                color: "var(--accent-green)",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {l.remaining_qty} left
+                            </span>
                           </div>
-                        </td>
-                      </tr>
+                        );
+                      })
                     )}
-                  </React.Fragment>
-                );
-              })}
-              {(invoice.charges ?? []).map((c, ci) => (
-                <tr
-                  key={`charge-${ci}`}
-                  style={{ background: "rgba(255,255,255,0.01)" }}
-                >
-                  <td style={{ color: "var(--text-muted)" }}>-</td>
-                  <td
-                    colSpan={3}
-                    style={{ color: "var(--text-dim)", fontStyle: "italic" }}
-                  >
-                    {c.label}
-                  </td>
-                  <td style={{ textAlign: "right" }}>{fmtMoney(c.amount)}</td>
-                  <td
-                    style={{ textAlign: "right", color: "var(--text-muted)" }}
-                  >
-                    -
-                  </td>
-                  <td style={{ textAlign: "right", fontWeight: 500 }}>
-                    {fmtMoney(c.amount)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                  </div>
+                </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <div
-            style={{
-              background: "var(--bg-input)",
-              borderRadius: 8,
-              padding: "10px 14px",
-              minWidth: 260,
-              display: "flex",
-              flexDirection: "column",
-              gap: 4,
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 12,
-                color: "var(--text-dim)",
-              }}
-            >
-              <span>Products sub-total</span>
-              <span>{fmtMoney(productSubtotal)}</span>
-            </div>
-            {chargesTotal > 0 &&
-              (invoice.charges ?? []).map((c, i) => (
                 <div
-                  key={i}
                   style={{
                     display: "flex",
                     justifyContent: "space-between",
-                    fontSize: 11,
-                    color: "var(--text-muted)",
+                    alignItems: "center",
                   }}
                 >
-                  <span>{c.label}</span>
-                  <span>{fmtMoney(c.amount)}</span>
+                  <button
+                    className="btn-ghost"
+                    style={{ fontSize: 12 }}
+                    onClick={() => setAssignStep((s) => Math.max(0, s - 1))}
+                    disabled={assignStep === 0}
+                  >
+                    ← Back
+                  </button>
+                  {isLast ? (
+                    <button
+                      className="btn-primary"
+                      style={{
+                        fontSize: 12,
+                        background: "var(--accent-green)",
+                      }}
+                      onClick={() => handleDispatch()}
+                      disabled={dispatching || !chosen}
+                    >
+                      {dispatching
+                        ? "Dispatching…"
+                        : "✓ Confirm purchases → dispatch"}
+                    </button>
+                  ) : (
+                    <button
+                      className="btn-primary"
+                      style={{ fontSize: 12 }}
+                      onClick={() => setAssignStep((s) => s + 1)}
+                      disabled={!chosen}
+                    >
+                      Next →
+                    </button>
+                  )}
                 </div>
-              ))}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 12,
-                color: "var(--text-dim)",
-              }}
-            >
-              <span>GST ({invoice.gst_rate}%)</span>
-              <span>{fmtMoney(invoice.gst_amount)}</span>
-            </div>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                fontSize: 15,
-                fontWeight: 700,
-                color: "var(--accent-green)",
-                borderTop: "1px solid var(--border)",
-                paddingTop: 6,
-                marginTop: 2,
-              }}
-            >
-              <span>Total</span>
-              <span>{fmtMoney(invoice.total)}</span>
-            </div>
-          </div>
-        </div>
-
-        {isPending && (
-          <div
-            style={{
-              background: "rgba(34,197,94,0.06)",
-              border: "1px solid rgba(34,197,94,0.25)",
-              borderRadius: 8,
-              padding: "12px 14px",
-            }}
-          >
-            <div
-              style={{
-                fontSize: 12,
-                fontWeight: 600,
-                color: "var(--accent-green)",
-                marginBottom: 8,
-              }}
-            >
-              Ready to dispatch?
-            </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                flexWrap: "wrap",
-              }}
-            >
-              <div>
-                <label
-                  style={{
-                    fontSize: 10,
-                    color: "var(--text-muted)",
-                    display: "block",
-                    marginBottom: 3,
-                  }}
-                >
-                  Dispatch date
-                </label>
-                <input
-                  type="date"
-                  value={dispatchDate}
-                  onChange={(e) => setDispatchDate(e.target.value)}
-                  style={{ width: 160 }}
-                />
               </div>
-              <button
-                className="btn-primary"
-                style={{
-                  fontSize: 12,
-                  background: "var(--accent-green)",
-                  marginTop: 14,
-                }}
-                onClick={handleDispatch}
-                disabled={dispatching}
-              >
-                {dispatching ? "Dispatching..." : "Mark as dispatched"}
-              </button>
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: "var(--accent-green)",
-                opacity: 0.8,
-                marginTop: 6,
-              }}
-            >
-              Deducts{" "}
-              {invoice.line_items.map((l) => `${l.qty}x ${l.model}`).join(", ")}{" "}
-              from {invoice.location} via FIFO and logs the sale.
-            </div>
-          </div>
-        )}
-
-        {isDispatched && !confirmUndo && (
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-              padding: "10px 12px",
-              background: "rgba(245,158,11,0.06)",
-              border: "1px solid rgba(245,158,11,0.25)",
-              borderRadius: 8,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                color: "var(--text-dim)",
-                lineHeight: 1.6,
-              }}
-            >
-              This invoice is dispatched — stock has been deducted via FIFO. If
-              it was marked dispatched by mistake, you can undo it: stock is
-              restored and the invoice returns to Pending Dispatch.
-            </div>
-            <button
-              className="btn-ghost"
-              style={{
-                fontSize: 11,
-                color: "var(--accent-amber)",
-                borderColor: "rgba(245,158,11,0.3)",
-                alignSelf: "flex-start",
-              }}
-              onClick={() => setConfirmUndo(true)}
-            >
-              ↺ Undo dispatch (restore stock)
-            </button>
-          </div>
-        )}
-
-        {confirmUndo && (
-          <div
-            style={{
-              background: "rgba(245,158,11,0.07)",
-              border: "1px solid rgba(245,158,11,0.3)",
-              borderRadius: 8,
-              padding: "10px 14px",
-              fontSize: 12,
-            }}
-          >
-            <div
-              style={{
-                fontWeight: 600,
-                color: "var(--accent-amber)",
-                marginBottom: 8,
-              }}
-            >
-              Undo this dispatch?
-            </div>
-            <div
-              style={{
-                color: "var(--text-muted)",
-                marginBottom: 10,
-                lineHeight: 1.6,
-              }}
-            >
-              Stock will be added back to the most recent open lot for each item
-              (or a new lot if none exists — flagged for cost review). The Sale
-              transactions will be removed, and the invoice returns to Pending
-              Dispatch so you can fix it and dispatch again.
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                className="btn-ghost"
-                style={{ fontSize: 11 }}
-                onClick={() => setConfirmUndo(false)}
-              >
-                Go back
-              </button>
-              <button
-                className="btn-primary"
-                style={{ fontSize: 11, background: "var(--accent-amber)" }}
-                onClick={handleUndoDispatch}
-                disabled={undoing}
-              >
-                {undoing ? "Undoing…" : "Yes, undo dispatch"}
-              </button>
-            </div>
-          </div>
-        )}
+            );
+          })()}
 
         {error && (
           <div
@@ -792,7 +885,7 @@ function InvoiceDetail({
           </div>
         )}
 
-        {isPending && !confirmCancel && !confirmDelete && (
+        {!wizardActive && isPending && !confirmCancel && !confirmDelete && (
           <div style={{ display: "flex", justifyContent: "flex-start" }}>
             <button
               className="btn-ghost"
@@ -849,7 +942,7 @@ function InvoiceDetail({
           </div>
         )}
 
-        {!isDispatched && !confirmDelete && !confirmCancel && (
+        {!wizardActive && !isDispatched && !confirmDelete && !confirmCancel && (
           <div style={{ display: "flex", justifyContent: "flex-start" }}>
             <button
               className="btn-ghost"
@@ -914,10 +1007,12 @@ function InvoiceDetail({
 // --- Main Invoices screen ----------------------------------------------------
 export default function Invoices({
   onStockChanged,
+  initialTab = "pending",
 }: {
   onStockChanged?: () => void;
+  initialTab?: "pending" | "all" | "overdue";
 }) {
-  const [tab, setTab] = useState<"pending" | "all">("pending");
+  const [tab, setTab] = useState<"pending" | "all" | "overdue">(initialTab);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Invoice | null>(null);
@@ -943,6 +1038,8 @@ export default function Invoices({
   }, []);
 
   useEffect(() => {
+    // "overdue" needs every invoice (not just pending) so we can filter by
+    // due date client-side — there's no dedicated status for it.
     load(tab === "pending" ? "pending_dispatch" : undefined);
   }, [tab, load]);
 
@@ -973,6 +1070,19 @@ export default function Invoices({
   // ── Filter + sort pipeline ─────────────────────────────────────────────────
   const displayedInvoices = useMemo(() => {
     let rows = invoices;
+
+    if (tab === "overdue") {
+      // "Overdue" here means the payment due date has passed. There's no
+      // payment-received tracking in this app, so this can't tell paid
+      // from unpaid — it just surfaces every non-cancelled invoice whose
+      // due date is behind today, same as Zoho's own "OVERDUE BY N DAYS"
+      // badge, which is purely due-date based too.
+      const todayStr = new Date().toISOString().split("T")[0];
+      rows = rows.filter(
+        (inv) =>
+          inv.status !== "cancelled" && inv.due_date && inv.due_date < todayStr,
+      );
+    }
 
     if (search.trim()) {
       rows = rows.filter((inv) => matchesSearch(inv, search.trim()));
@@ -1099,6 +1209,16 @@ export default function Invoices({
             }}
           >
             All invoices
+          </div>
+          <div
+            className={`inv-tab${tab === "overdue" ? " on" : ""}`}
+            onClick={() => {
+              setTab("overdue");
+              setSelected(null);
+              load(); // overdue needs the full unfiltered set
+            }}
+          >
+            Overdue
           </div>
           <div style={{ flex: 1 }} />
           <button
