@@ -98,6 +98,18 @@ export default function Dashboard({ products, sales, purchases }: Props) {
 
   const [stock, setStock] = useState<any[]>([]);
   const [stockLoading, setStockLoading] = useState(true);
+  const [lowStockThreshold, setLowStockThreshold] = useState(2);
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.settings?.low_stock_threshold != null) {
+          setLowStockThreshold(Number(d.settings.low_stock_threshold));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetch("/api/stock")
@@ -147,7 +159,7 @@ export default function Dashboard({ products, sales, purchases }: Props) {
       if (s.category && !row.category) row.category = s.category;
     }
     return Array.from(map.values()).filter(
-      (r) => r.stockKochi + r.stockBlore <= 1,
+      (r) => r.stockKochi + r.stockBlore <= lowStockThreshold,
     );
   }, [stock]);
 

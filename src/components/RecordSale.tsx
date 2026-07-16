@@ -754,9 +754,12 @@ function ModelCombobox({
 export default function RecordSale({ products, onSuccess }: Props) {
   const today = new Date().toISOString().split("T")[0];
   const yr = new Date().getFullYear();
-  const defaultInvoiceNum = `${yr}-${yr + 1}-KL-`;
+  // Fallback pattern used only until /api/settings resolves (or if it has
+  // no invoice_prefix configured) — the real prefix is business-specific
+  // and comes from Settings, not hardcoded here.
+  const fallbackInvoiceNum = `${yr}-${yr + 1}-`;
 
-  const [invoiceNum, setInvoiceNum] = useState(defaultInvoiceNum);
+  const [invoiceNum, setInvoiceNum] = useState(fallbackInvoiceNum);
   const [invoiceDate, setInvoiceDate] = useState(today);
   const [dueDate, setDueDate] = useState(today);
   const [location, setLocation] = useState("Kochi");
@@ -768,6 +771,29 @@ export default function RecordSale({ products, onSuccess }: Props) {
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [customerError, setCustomerError] = useState(false);
+
+  // Load business-configured defaults (invoice number prefix, default GST
+  // rate) from Settings — this is what makes the invoice numbering/tax
+  // rate adapt to whatever business is running this app, instead of being
+  // hardcoded to one company's scheme.
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d) => {
+        const s = d.settings;
+        if (!s) return;
+        if (s.invoice_prefix) {
+          setInvoiceNum((prev) =>
+            prev === fallbackInvoiceNum ? s.invoice_prefix : prev,
+          );
+        }
+        if (s.default_gst_rate) {
+          setGstRate(Number(s.default_gst_rate));
+        }
+      })
+      .catch(() => {}); // keep the fallback values on any error
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Invoice Import (Claude JSON / Excel) ──────────────────────────────────
   const [showImport, setShowImport] = useState(false);

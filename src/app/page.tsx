@@ -17,6 +17,7 @@ import PendingInvoices from "@/components/PendingInvoices";
 import ComingSoon from "@/components/ComingSoon";
 import Bin from "@/components/Bin";
 import StockSerials from "@/components/StockSerials";
+import Settings from "@/components/Settings";
 export type Screen =
   // existing
   | "dashboard"
@@ -491,19 +492,7 @@ export default function Home() {
               ]}
             />
           )}
-          {screen === "settings" && (
-            <ComingSoon
-              title="Settings"
-              icon="⚙"
-              description="Configure TMCI Desk — company profile, invoice numbering, GST rates, and integrations."
-              bullets={[
-                "Company name, address, GSTIN, logo",
-                "Invoice / Quotation number prefixes",
-                "Default GST rate and HSN codes",
-                "Google Sheets and Supabase connection status",
-              ]}
-            />
-          )}
+          {screen === "settings" && <Settings />}
           {screen === "bin" && <Bin />}
         </div>
       </div>

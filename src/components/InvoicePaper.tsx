@@ -1,4 +1,5 @@
 "use client";
+import { useEffect, useState } from "react";
 // src/components/InvoicePaper.tsx
 //
 // Shared, presentational-only component: renders one invoice as a
@@ -33,7 +34,9 @@ export interface InvoicePaperData {
   notes: string | null;
 }
 
-const COMPANY = {
+// Everything below is user-editable in Settings — these are just the
+// fallback values shown before that fetch resolves (or if it fails).
+const FALLBACK_COMPANY = {
   name: "TMCI Technology Private Limited",
   companyId: "U52335KA2012PTC067266",
   addressLines: [
@@ -47,12 +50,13 @@ const COMPANY = {
   website: "www.tazkmazter.com",
   gstin: "32AAECT4944P1ZW",
   gstState: "Kerala (32)",
-  bank: {
-    name: "STATE BANK OF INDIA",
-    account: "67299135280",
-    branch: "PPB INDIRANAGAR, BANGALORE",
-    ifsc: "SBIN0070679",
-  },
+};
+
+const FALLBACK_BANK = {
+  name: "STATE BANK OF INDIA",
+  account: "67299135280",
+  branch: "PPB INDIRANAGAR, BANGALORE",
+  ifsc: "SBIN0070679",
 };
 
 const fmtDateDMY = (raw: string) => {
@@ -151,11 +155,19 @@ function amountInWords(total: number): string {
   return `Indian Rupee ${rupeeWords} Only`;
 }
 
-function isIntraStateKerala(customer: any): boolean {
-  const state = String(
-    customer?.billing_state || customer?.state || "",
-  ).toLowerCase();
-  return state.includes("kerala");
+function isIntraState(customerState: string, companyGstState: string): boolean {
+  // Compares the customer's billing state against the company's OWN
+  // registered GST state (e.g. "Kerala (32)" -> "kerala") — works for any
+  // business, in any state, not just one hardcoded to Kerala.
+  const custState = String(customerState || "")
+    .toLowerCase()
+    .trim();
+  const homeState = String(companyGstState || "")
+    .replace(/\s*\(.*\)\s*$/, "") // strip trailing "(32)" style code
+    .toLowerCase()
+    .trim();
+  if (!custState || !homeState) return true; // default to intra-state if unknown
+  return custState.includes(homeState) || homeState.includes(custState);
 }
 
 export default function InvoicePaper({
@@ -163,7 +175,50 @@ export default function InvoicePaper({
 }: {
   invoice: InvoicePaperData;
 }) {
-  const intraState = isIntraStateKerala(invoice.customer_snapshot);
+  const [companySettings, setCompanySettings] = useState<any>(null);
+
+  useEffect(() => {
+    fetch("/api/settings")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.settings) setCompanySettings(d.settings);
+      })
+      .catch(() => {}); // silently fall back to defaults below
+  }, []);
+
+  const bank = companySettings
+    ? {
+        name: companySettings.bank_name,
+        account: companySettings.account_number,
+        branch: companySettings.branch_name,
+        ifsc: companySettings.ifsc_code,
+      }
+    : FALLBACK_BANK;
+  const logoUrl = companySettings?.logo_url ?? null;
+
+  const COMPANY = companySettings
+    ? {
+        name: companySettings.company_name,
+        companyId: companySettings.company_id,
+        addressLines: [
+          companySettings.address_line1,
+          companySettings.address_line2,
+          companySettings.address_line3,
+          companySettings.address_line4,
+        ].filter(Boolean),
+        phone: companySettings.phone,
+        email: companySettings.email,
+        website: companySettings.website,
+        gstin: companySettings.gstin,
+        gstState: companySettings.gst_state,
+      }
+    : FALLBACK_COMPANY;
+
+  const customerState =
+    invoice.customer_snapshot?.billing_state ||
+    invoice.customer_snapshot?.state ||
+    "";
+  const intraState = isIntraState(customerState, COMPANY.gstState);
   const halfRate = (invoice.gst_rate ?? 18) / 2;
   const customer = invoice.customer_snapshot;
   const billTo = customer
@@ -178,8 +233,60 @@ export default function InvoicePaper({
     : "";
 
   return (
-    <div className="ip-paper">
-      <style>{`
+    <div>
+      {/* Toolbar — hidden when actually printing/saving as PDF, so it
+          never shows up in the output itself. */}
+      <div
+        className="ip-no-print"
+        style={{
+          display: "flex",
+          justifyContent: "flex-end",
+          marginBottom: 10,
+          maxWidth: 860,
+          marginLeft: "auto",
+          marginRight: "auto",
+        }}
+      >
+        <button
+          onClick={() => window.print()}
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            padding: "7px 14px",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "var(--accent)",
+            color: "#fff",
+            cursor: "pointer",
+          }}
+        >
+          ⬇ Download / Print PDF
+        </button>
+      </div>
+
+      <div className="ip-paper">
+        <style>{`
+        /* Printing / "Save as PDF": hide everything on the page except
+           this invoice paper, and let it fill the printed page cleanly.
+           No extra libraries needed — this uses the browser's own
+           print-to-PDF, which preserves text/fonts exactly (unlike
+           canvas-based exporters). */
+        @media print {
+          @page { size: A4; margin: 12mm; }
+          .ip-no-print { display: none !important; }
+          body * { visibility: hidden; }
+          .ip-paper, .ip-paper * { visibility: visible; }
+          .ip-paper {
+            position: absolute; left: 0; top: 0; width: 100%;
+            box-shadow: none !important; max-width: none !important;
+            padding: 0 !important;
+          }
+          /* The min-height below is only for the on-screen "blank space
+             below the signature" look — it's TALLER than one printable A4
+             page, so left as-is it forces an empty second page on export.
+             Let printed output size to its actual content instead. */
+          .ip-inner { min-height: 0 !important; }
+        }
         /* NOTE: every rule below uses !important because the app's global
            dark-theme styles (table, th, td, backgrounds, text colors) bleed
            into this component otherwise — the paper must stay white with
@@ -189,7 +296,7 @@ export default function InvoicePaper({
           width: 100%; max-width: 860px; margin: 0 auto;
           font-family: Arial, Helvetica, sans-serif;
           padding: 34px 40px;
-          font-size: 12.5px;
+          font-size: 14px;
           line-height: 1.5;
         }
         .ip-paper * { color: #1a1a1a; }
@@ -203,12 +310,12 @@ export default function InvoicePaper({
         }
         .ip-header-block { display: flex; justify-content: space-between; align-items: flex-start; padding: 14px 16px; }
         .ip-meta-block {
-          display: grid; grid-template-columns: 55% 45%;
+          display: grid; grid-template-columns: 1fr 1fr;
           border-top: 1.5px solid #333; border-bottom: 1.5px solid #333;
         }
         .ip-meta-left { padding: 8px 12px; }
         .ip-meta-right { padding: 8px 12px; border-left: 1.5px solid #333; }
-        .ip-meta-row { display: flex; font-size: 12.5px; padding: 1.5px 0; }
+        .ip-meta-row { display: flex; font-size: 14px; padding: 2px 0; }
         .ip-meta-row .k { width: 120px; flex-shrink: 0; }
         .ip-meta-row .v { font-weight: 700; }
         .ip-section { padding: 10px 16px 40px; }
@@ -216,7 +323,7 @@ export default function InvoicePaper({
         .ip-meta-table { border-collapse: collapse !important; width: 100% !important; }
         .ip-meta-table td {
           border: none !important; padding: 2px 0 !important;
-          font-size: 12.5px !important; vertical-align: top !important;
+          font-size: 13.5px !important; vertical-align: top !important;
           background: transparent !important; color: #1a1a1a !important;
         }
         .ip-meta-label { font-weight: 700; width: 130px; }
@@ -227,14 +334,14 @@ export default function InvoicePaper({
         .ip-billship-col { padding: 8px 12px; }
         .ip-billship-col + .ip-billship-col { border-left: 1px solid #333; }
         .ip-billship-label {
-          font-weight: 700; font-size: 12px; background: #f2f2f2 !important;
+          font-weight: 700; font-size: 13.5px; background: #f2f2f2 !important;
           margin: -8px -12px 8px -12px; padding: 6px 12px;
           border-bottom: 1px solid #333;
         }
         .ip-items-table { border-collapse: collapse !important; width: 100% !important; }
         .ip-items-table th, .ip-items-table td {
           border: 1px solid #333 !important; padding: 6px 8px !important;
-          font-size: 12px !important; vertical-align: top !important;
+          font-size: 13px !important; vertical-align: top !important;
           color: #1a1a1a !important;
         }
         .ip-items-table th {
@@ -247,7 +354,7 @@ export default function InvoicePaper({
         .ip-totals-table { border-collapse: collapse !important; width: 100% !important; }
         .ip-totals-table td {
           border: none !important; padding: 3px 0 !important;
-          font-size: 12.5px !important; background: transparent !important;
+          font-size: 13.5px !important; background: transparent !important;
           color: #1a1a1a !important;
         }
         .ip-totals-table tr.ip-total-row td {
@@ -256,261 +363,273 @@ export default function InvoicePaper({
         }
       `}</style>
 
-      <div className="ip-inner">
-        {/* Header */}
-        <div className="ip-header-block">
-          <div style={{ display: "flex", gap: 14 }}>
-            <div
-              style={{
-                width: 56,
-                height: 56,
-                borderRadius: "50%",
-                border: "3px solid #1a2a6c",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontWeight: 700,
-                fontSize: 11,
-                color: "#1a2a6c",
-                flexShrink: 0,
-              }}
-            >
-              TMCI
-            </div>
-            <div style={{ fontSize: 12, lineHeight: 1.5 }}>
-              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>
-                {COMPANY.name}
-              </div>
-              <div>Company ID : {COMPANY.companyId}</div>
-              {COMPANY.addressLines.map((l, i) => (
-                <div key={i}>{l}</div>
-              ))}
-              <div>{COMPANY.phone}</div>
-              <div>{COMPANY.email}</div>
-              <div>{COMPANY.website}</div>
-              <div>GSTIN: {COMPANY.gstin}</div>
-            </div>
-          </div>
-          <div
-            style={{
-              fontSize: 28,
-              fontWeight: 700,
-              letterSpacing: "0.05em",
-              color: "#1a1a1a",
-            }}
-          >
-            INVOICE
-          </div>
-        </div>
-
-        {/* Invoice meta — bordered two-pane row exactly like the PDF:
-          left pane has the invoice fields with BOLD values, right pane has
-          Place Of Supply. */}
-        <div className="ip-meta-block">
-          <div className="ip-meta-left">
-            <div className="ip-meta-row">
-              <span className="k">Invoice Number</span>
-              <span className="v">: {invoice.invoice_number}</span>
-            </div>
-            <div className="ip-meta-row">
-              <span className="k">Invoice Date</span>
-              <span className="v">: {fmtDateDMY(invoice.invoice_date)}</span>
-            </div>
-            <div className="ip-meta-row">
-              <span className="k">Terms</span>
-              <span className="v">: Due on Receipt</span>
-            </div>
-            <div className="ip-meta-row">
-              <span className="k">Due Date</span>
-              <span className="v">: {fmtDateDMY(invoice.due_date)}</span>
-            </div>
-            {(invoice as any).po_number && (
-              <div className="ip-meta-row">
-                <span className="k">P.O. Number</span>
-                <span className="v">: {(invoice as any).po_number}</span>
-              </div>
-            )}
-          </div>
-          <div className="ip-meta-right">
-            <div className="ip-meta-row">
-              <span className="k">Place Of Supply</span>
-              <span className="v">: {COMPANY.gstState}</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Bill To / Ship To */}
-        <div
-          className="ip-billship"
-          style={{ border: "none", borderBottom: "1.5px solid #333" }}
-        >
-          <div className="ip-billship-col">
-            <div className="ip-billship-label">Bill To</div>
-            <div style={{ fontWeight: 700, color: "#1a4fa0" }}>
-              {customer?.display_name || customer?.name}
-            </div>
-            <div>{billTo}</div>
-            <div>India</div>
-            {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
-          </div>
-          <div className="ip-billship-col">
-            <div className="ip-billship-label">Ship To</div>
-            <div style={{ fontWeight: 700 }}>
-              {customer?.display_name || customer?.name}
-            </div>
-            <div>{billTo}</div>
-            <div>India</div>
-            {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
-          </div>
-        </div>
-
-        {/* Subject */}
-        <div className="ip-section">
-          {invoice.notes && (
-            <div style={{ fontSize: 12, marginBottom: 12 }}>
-              Subject :
-              <br />
-              {invoice.notes}
-            </div>
-          )}
-
-          {/* Line items */}
-          <table className="ip-items-table">
-            <thead>
-              <tr>
-                <th style={{ width: 34 }}>S.No</th>
-                <th>Item &amp; Description</th>
-                <th style={{ width: 80 }}>HSN / SAC</th>
-                <th style={{ width: 50, textAlign: "right" }}>Qty</th>
-                <th style={{ width: 80, textAlign: "right" }}>Rate</th>
-                {intraState ? (
-                  <>
-                    <th style={{ width: 80, textAlign: "right" }}>CGST</th>
-                    <th style={{ width: 80, textAlign: "right" }}>SGST</th>
-                  </>
-                ) : (
-                  <th style={{ width: 90, textAlign: "right" }}>IGST</th>
-                )}
-                <th style={{ width: 90, textAlign: "right" }}>Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {invoice.line_items.map((l, i) => {
-                const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
-                const lineAmount = eff * l.qty;
-                const lineTax = (lineAmount * invoice.gst_rate) / 100;
-                const half = lineTax / 2;
-                return (
-                  <tr key={i}>
-                    <td>{i + 1}</td>
-                    <td>
-                      <div>
-                        {/^fluke/i.test(l.model) ? l.model : `Fluke ${l.model}`}
-                      </div>
-                      {l.description && <div>{l.description}</div>}
-                      {(l.serialNumbers?.filter(Boolean).length ?? 0) > 0 && (
-                        <div>
-                          S/N: {l.serialNumbers.filter(Boolean).join(" & ")}
-                        </div>
-                      )}
-                    </td>
-                    <td>{l.hsn}</td>
-                    <td style={{ textAlign: "right" }}>
-                      {l.qty.toFixed(2)}
-                      <br />
-                      pcs
-                    </td>
-                    <td style={{ textAlign: "right" }}>{fmt2(eff)}</td>
-                    {intraState ? (
-                      <>
-                        <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
-                        <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
-                      </>
-                    ) : (
-                      <td style={{ textAlign: "right" }}>{fmt2(lineTax)}</td>
-                    )}
-                    <td style={{ textAlign: "right" }}>{fmt2(lineAmount)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-
-          {/* Totals + amount in words + bank details */}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginTop: 16,
-              gap: 20,
-            }}
-          >
-            <div style={{ fontSize: 12, flex: 1 }}>
-              <div style={{ marginBottom: 10 }}>
-                <strong>Total In Words</strong>
-                <br />
-                <em>{amountInWords(invoice.total)}</em>
-              </div>
-              <div>Bank Name: {COMPANY.bank.name}</div>
-              <div>Account Number: {COMPANY.bank.account}</div>
-              <div>Branch Name: {COMPANY.bank.branch}</div>
-              <div>IFSC Code: {COMPANY.bank.ifsc}</div>
-            </div>
-
-            <div style={{ width: 260, fontSize: 12 }}>
-              <table className="ip-totals-table">
-                <tbody>
-                  <tr>
-                    <td>Sub Total</td>
-                    <td style={{ textAlign: "right" }}>
-                      {fmt2(invoice.subtotal)}
-                    </td>
-                  </tr>
-                  {intraState ? (
-                    <>
-                      <tr>
-                        <td>
-                          CGST{halfRate} ({halfRate}%)
-                        </td>
-                        <td style={{ textAlign: "right" }}>
-                          {fmt2(invoice.gst_amount / 2)}
-                        </td>
-                      </tr>
-                      <tr>
-                        <td>
-                          SGST{halfRate} ({halfRate}%)
-                        </td>
-                        <td style={{ textAlign: "right" }}>
-                          {fmt2(invoice.gst_amount / 2)}
-                        </td>
-                      </tr>
-                    </>
-                  ) : (
-                    <tr>
-                      <td>IGST ({invoice.gst_rate}%)</td>
-                      <td style={{ textAlign: "right" }}>
-                        {fmt2(invoice.gst_amount)}
-                      </td>
-                    </tr>
-                  )}
-                  <tr className="ip-total-row">
-                    <td>Total</td>
-                    <td style={{ textAlign: "right" }}>
-                      Rs.{fmt2(invoice.total)}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+        <div className="ip-inner">
+          {/* Header */}
+          <div className="ip-header-block">
+            <div style={{ display: "flex", gap: 14 }}>
               <div
                 style={{
-                  marginTop: 60,
-                  borderTop: "1px solid #1a1a1a",
-                  paddingTop: 4,
-                  textAlign: "center",
-                  fontSize: 11,
+                  width: 56,
+                  height: 56,
+                  borderRadius: "50%",
+                  border: logoUrl ? "none" : "3px solid #1a2a6c",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontWeight: 700,
+                  fontSize: 12,
+                  color: "#1a2a6c",
+                  flexShrink: 0,
+                  overflow: "hidden",
                 }}
               >
-                Authorized Signatory
+                {logoUrl ? (
+                  <img
+                    src={logoUrl}
+                    alt="Company logo"
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                    }}
+                  />
+                ) : (
+                  "TMCI"
+                )}
+              </div>
+              <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>
+                  {COMPANY.name}
+                </div>
+                <div>Company ID : {COMPANY.companyId}</div>
+                {COMPANY.addressLines.map((l, i) => (
+                  <div key={i}>{l}</div>
+                ))}
+                <div>{COMPANY.phone}</div>
+                <div>{COMPANY.email}</div>
+                <div>{COMPANY.website}</div>
+                <div>GSTIN: {COMPANY.gstin}</div>
+              </div>
+            </div>
+            <div
+              style={{
+                fontSize: 32,
+                fontWeight: 700,
+                letterSpacing: "0.05em",
+                color: "#1a1a1a",
+              }}
+            >
+              INVOICE
+            </div>
+          </div>
+
+          {/* Invoice meta — bordered two-pane row exactly like the PDF:
+          left pane has the invoice fields with BOLD values, right pane has
+          Place Of Supply. */}
+          <div className="ip-meta-block">
+            <div className="ip-meta-left">
+              <div className="ip-meta-row">
+                <span className="k">Invoice Number</span>
+                <span className="v">: {invoice.invoice_number}</span>
+              </div>
+              <div className="ip-meta-row">
+                <span className="k">Invoice Date</span>
+                <span className="v">: {fmtDateDMY(invoice.invoice_date)}</span>
+              </div>
+              <div className="ip-meta-row">
+                <span className="k">Terms</span>
+                <span className="v">: Due on Receipt</span>
+              </div>
+              <div className="ip-meta-row">
+                <span className="k">Due Date</span>
+                <span className="v">: {fmtDateDMY(invoice.due_date)}</span>
+              </div>
+              {(invoice as any).po_number && (
+                <div className="ip-meta-row">
+                  <span className="k">P.O. Number</span>
+                  <span className="v">: {(invoice as any).po_number}</span>
+                </div>
+              )}
+            </div>
+            <div className="ip-meta-right">
+              <div className="ip-meta-row">
+                <span className="k">Place Of Supply</span>
+                <span className="v">: {COMPANY.gstState}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Bill To / Ship To */}
+          <div
+            className="ip-billship"
+            style={{ border: "none", borderBottom: "1.5px solid #333" }}
+          >
+            <div className="ip-billship-col">
+              <div className="ip-billship-label">Bill To</div>
+              <div style={{ fontWeight: 700, color: "#1a4fa0" }}>
+                {customer?.display_name || customer?.name}
+              </div>
+              <div>{billTo}</div>
+              <div>India</div>
+              {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+            </div>
+            <div className="ip-billship-col">
+              <div className="ip-billship-label">Ship To</div>
+              <div style={{ fontWeight: 700 }}>
+                {customer?.display_name || customer?.name}
+              </div>
+              <div>{billTo}</div>
+              <div>India</div>
+              {customer?.gstin && <div>GSTIN {customer.gstin}</div>}
+            </div>
+          </div>
+
+          {/* Subject */}
+          <div className="ip-section">
+            {invoice.notes && (
+              <div style={{ fontSize: 13, marginBottom: 12 }}>
+                Subject :
+                <br />
+                {invoice.notes}
+              </div>
+            )}
+
+            {/* Line items */}
+            <table className="ip-items-table">
+              <thead>
+                <tr>
+                  <th style={{ width: 34 }}>S.No</th>
+                  <th>Item &amp; Description</th>
+                  <th style={{ width: 80 }}>HSN / SAC</th>
+                  <th style={{ width: 50, textAlign: "right" }}>Qty</th>
+                  <th style={{ width: 80, textAlign: "right" }}>Rate</th>
+                  {intraState ? (
+                    <>
+                      <th style={{ width: 80, textAlign: "right" }}>CGST</th>
+                      <th style={{ width: 80, textAlign: "right" }}>SGST</th>
+                    </>
+                  ) : (
+                    <th style={{ width: 90, textAlign: "right" }}>IGST</th>
+                  )}
+                  <th style={{ width: 90, textAlign: "right" }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {invoice.line_items.map((l, i) => {
+                  const eff = l.unitSalePrice * (1 - (l.discount ?? 0) / 100);
+                  const lineAmount = eff * l.qty;
+                  const lineTax = (lineAmount * invoice.gst_rate) / 100;
+                  const half = lineTax / 2;
+                  return (
+                    <tr key={i}>
+                      <td>{i + 1}</td>
+                      <td>
+                        <div>{l.model}</div>
+                        {l.description && <div>{l.description}</div>}
+                        {(l.serialNumbers?.filter(Boolean).length ?? 0) > 0 && (
+                          <div>
+                            S/N: {l.serialNumbers.filter(Boolean).join(" & ")}
+                          </div>
+                        )}
+                      </td>
+                      <td>{l.hsn}</td>
+                      <td style={{ textAlign: "right" }}>
+                        {l.qty.toFixed(2)}
+                        <br />
+                        pcs
+                      </td>
+                      <td style={{ textAlign: "right" }}>{fmt2(eff)}</td>
+                      {intraState ? (
+                        <>
+                          <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                          <td style={{ textAlign: "right" }}>{fmt2(half)}</td>
+                        </>
+                      ) : (
+                        <td style={{ textAlign: "right" }}>{fmt2(lineTax)}</td>
+                      )}
+                      <td style={{ textAlign: "right" }}>{fmt2(lineAmount)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+
+            {/* Totals + amount in words + bank details */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                marginTop: 16,
+                gap: 20,
+              }}
+            >
+              <div style={{ fontSize: 13, flex: 1 }}>
+                <div style={{ marginBottom: 10 }}>
+                  <strong>Total In Words</strong>
+                  <br />
+                  <em>{amountInWords(invoice.total)}</em>
+                </div>
+                <div>Bank Name: {bank.name}</div>
+                <div>Account Number: {bank.account}</div>
+                <div>Branch Name: {bank.branch}</div>
+                <div>IFSC Code: {bank.ifsc}</div>
+              </div>
+
+              <div style={{ width: 270, fontSize: 13 }}>
+                <table className="ip-totals-table">
+                  <tbody>
+                    <tr>
+                      <td>Sub Total</td>
+                      <td style={{ textAlign: "right" }}>
+                        {fmt2(invoice.subtotal)}
+                      </td>
+                    </tr>
+                    {intraState ? (
+                      <>
+                        <tr>
+                          <td>
+                            CGST{halfRate} ({halfRate}%)
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            {fmt2(invoice.gst_amount / 2)}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>
+                            SGST{halfRate} ({halfRate}%)
+                          </td>
+                          <td style={{ textAlign: "right" }}>
+                            {fmt2(invoice.gst_amount / 2)}
+                          </td>
+                        </tr>
+                      </>
+                    ) : (
+                      <tr>
+                        <td>IGST ({invoice.gst_rate}%)</td>
+                        <td style={{ textAlign: "right" }}>
+                          {fmt2(invoice.gst_amount)}
+                        </td>
+                      </tr>
+                    )}
+                    <tr className="ip-total-row">
+                      <td>Total</td>
+                      <td style={{ textAlign: "right" }}>
+                        Rs.{fmt2(invoice.total)}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div
+                  style={{
+                    marginTop: 60,
+                    borderTop: "1px solid #1a1a1a",
+                    paddingTop: 4,
+                    textAlign: "center",
+                    fontSize: 12,
+                  }}
+                >
+                  Authorized Signatory
+                </div>
               </div>
             </div>
           </div>
