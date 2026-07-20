@@ -1,18 +1,19 @@
 "use client";
 import { useState } from "react";
 import type { Screen } from "@/app/page";
+import { Icon, IconName } from "@/components/icons";
 
 interface NavItem {
   id: Screen;
   label: string;
-  icon: string;
+  icon: IconName;
   badge?: string;
 }
 
 interface NavSection {
   key: string;
   label: string;
-  icon: string;
+  icon: IconName;
   items: NavItem[];
 }
 
@@ -20,76 +21,81 @@ const NAV: NavSection[] = [
   {
     key: "overview",
     label: "Overview",
-    icon: "▦",
-    items: [{ id: "dashboard", label: "Dashboard", icon: "▦" }],
+    icon: "dashboard",
+    items: [{ id: "dashboard", label: "Dashboard", icon: "dashboard" }],
   },
   {
     key: "crm",
     label: "CRM",
-    icon: "👥",
+    icon: "users",
     items: [
-      { id: "customers", label: "Customers", icon: "👥" },
-      { id: "vendors", label: "Vendors", icon: "🏭" },
-      { id: "projects", label: "Projects", icon: "📁" },
+      { id: "customers", label: "Customers", icon: "users" },
+      { id: "vendors", label: "Vendors", icon: "factory" },
+      { id: "projects", label: "Projects", icon: "folder" },
     ],
   },
   {
     key: "sales",
     label: "Sales",
-    icon: "🧾",
+    icon: "receipt",
     items: [
-      { id: "quotation", label: "Quotation", icon: "📄" },
-      { id: "proforma", label: "Proforma Invoice", icon: "📋" },
+      { id: "quotation", label: "Quotation", icon: "file" },
+      { id: "proforma", label: "Proforma Invoice", icon: "clipboard" },
       {
         id: "sale",
         label: "New Sale / Dispatch",
-        icon: "⬆",
+        icon: "arrow-up",
         badge: "STOCK OUT",
       },
-      { id: "invoices", label: "All Invoices", icon: "🧾" },
-      { id: "credit_note", label: "Credit Note", icon: "↩" },
-      { id: "challan", label: "Delivery Challan", icon: "🚚" },
-      { id: "packing_list", label: "Packing List", icon: "📦" },
-      { id: "eway_bill", label: "E-Way Bill", icon: "🛣" },
+      { id: "invoices", label: "All Invoices", icon: "receipt" },
+      { id: "credit_note", label: "Credit Note", icon: "undo" },
+      { id: "challan", label: "Delivery Challan", icon: "truck" },
+      { id: "packing_list", label: "Packing List", icon: "box" },
+      { id: "eway_bill", label: "E-Way Bill", icon: "road" },
     ],
   },
   {
     key: "inventory",
     label: "Inventory",
-    icon: "📦",
+    icon: "box",
     items: [
-      { id: "purchase", label: "New Purchase", icon: "⬇", badge: "STOCK IN" },
-      { id: "stock", label: "View Stock", icon: "≡" },
-      { id: "transfers", label: "Stock Transfer", icon: "⇄" },
-      { id: "debit_note", label: "Debit Note", icon: "📝" },
+      {
+        id: "purchase",
+        label: "New Purchase",
+        icon: "arrow-down",
+        badge: "STOCK IN",
+      },
+      { id: "stock", label: "View Stock", icon: "list" },
+      { id: "transfers", label: "Stock Transfer", icon: "swap" },
+      { id: "debit_note", label: "Debit Note", icon: "note" },
     ],
   },
   {
     key: "expenses",
     label: "Expenses",
-    icon: "💸",
+    icon: "wallet",
     items: [
-      { id: "expenses", label: "Company Expenses", icon: "💸" },
-      { id: "proj_expenses", label: "Project Expenses", icon: "🧾" },
+      { id: "expenses", label: "Company Expenses", icon: "wallet" },
+      { id: "proj_expenses", label: "Project Expenses", icon: "clipboard" },
     ],
   },
   {
     key: "people",
     label: "People",
-    icon: "👤",
-    items: [{ id: "employees", label: "Employees", icon: "👤" }],
+    icon: "user",
+    items: [{ id: "employees", label: "Employees", icon: "user" }],
   },
   {
     key: "admin",
     label: "Admin",
-    icon: "⚙",
+    icon: "settings",
     items: [
-      { id: "stock_serials", label: "Stock & Serials", icon: "🔢" },
-      { id: "bin", label: "Bin", icon: "🗑" },
-      { id: "audit_log", label: "Audit Log", icon: "🔍" },
-      { id: "ledger", label: "Ledger", icon: "📒" },
-      { id: "downloads", label: "Downloads", icon: "↧" },
-      { id: "settings", label: "Settings", icon: "⚙" },
+      { id: "stock_serials", label: "Stock & Serials", icon: "hash" },
+      { id: "bin", label: "Bin", icon: "trash" },
+      { id: "audit_log", label: "Audit Log", icon: "search" },
+      { id: "ledger", label: "Ledger", icon: "book" },
+      { id: "downloads", label: "Downloads", icon: "download" },
+      { id: "settings", label: "Settings", icon: "settings" },
     ],
   },
 ];
@@ -178,8 +184,14 @@ export default function Sidebar({
                   marginTop: 2,
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontSize: 11 }}>{section.icon}</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                  <Icon
+                    name={section.icon}
+                    size={13}
+                    style={{
+                      color: hasActive ? "var(--accent)" : "var(--text-muted)",
+                    }}
+                  />
                   <span
                     style={{
                       fontSize: 10,
@@ -192,17 +204,15 @@ export default function Sidebar({
                     {section.label}
                   </span>
                 </div>
-                <span
+                <Icon
+                  name="chevron-right"
+                  size={11}
                   style={{
-                    fontSize: 9,
                     color: "var(--text-muted)",
                     transform: isOpen ? "rotate(90deg)" : "rotate(0deg)",
                     transition: "transform 0.15s ease",
-                    display: "inline-block",
                   }}
-                >
-                  ▶
-                </span>
+                />
               </div>
 
               {isOpen && (
@@ -216,7 +226,7 @@ export default function Sidebar({
                         style={{
                           display: "flex",
                           alignItems: "center",
-                          gap: 7,
+                          gap: 8,
                           padding: "6px 10px 6px 26px",
                           fontSize: 12,
                           cursor: "pointer",
@@ -247,13 +257,14 @@ export default function Sidebar({
                       >
                         <span
                           style={{
-                            fontSize: 13,
                             width: 16,
-                            textAlign: "center",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
                             flexShrink: 0,
                           }}
                         >
-                          {item.icon}
+                          <Icon name={item.icon} size={14} />
                         </span>
                         <span
                           style={{
@@ -268,6 +279,9 @@ export default function Sidebar({
                         {item.badge && (
                           <span
                             style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 3,
                               fontSize: 8,
                               fontWeight: 700,
                               padding: "1px 5px",
@@ -284,6 +298,14 @@ export default function Sidebar({
                               letterSpacing: "0.03em",
                             }}
                           >
+                            <Icon
+                              name={
+                                item.badge === "STOCK IN"
+                                  ? "arrow-down"
+                                  : "arrow-up"
+                              }
+                              size={8}
+                            />
                             {item.badge}
                           </span>
                         )}

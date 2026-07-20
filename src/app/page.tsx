@@ -18,6 +18,7 @@ import ComingSoon from "@/components/ComingSoon";
 import Bin from "@/components/Bin";
 import StockSerials from "@/components/StockSerials";
 import Settings from "@/components/Settings";
+import Expenses from "@/components/Expenses";
 export type Screen =
   // existing
   | "dashboard"
@@ -436,33 +437,8 @@ export default function Home() {
             />
           )}
 
-          {/* ── New Expense screens ── */}
-          {screen === "expenses" && (
-            <ComingSoon
-              title="Company Expenses"
-              icon="💸"
-              description="Track all company-level operating expenses — rent, utilities, salaries, subscriptions, and more."
-              bullets={[
-                "Expense categories and tags",
-                "Receipt upload and attachment",
-                "Monthly and annual summaries",
-                "Export to CSV for accounting",
-              ]}
-            />
-          )}
-          {screen === "proj_expenses" && (
-            <ComingSoon
-              title="Project Expenses"
-              icon="🧾"
-              description="Track expenses billed or incurred against specific projects — travel, installation, materials."
-              bullets={[
-                "Link expense to project",
-                "Billable vs non-billable flag",
-                "Project P&L view",
-                "Reimbursement tracking",
-              ]}
-            />
-          )}
+          {screen === "expenses" && <Expenses type="company" />}
+          {screen === "proj_expenses" && <Expenses type="project" />}
 
           {/* ── People / Admin ── */}
           {screen === "employees" && (
