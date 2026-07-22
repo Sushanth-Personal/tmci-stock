@@ -38,6 +38,11 @@ export type Screen =
   | "vendors"
   | "projects"
   // new Sales
+  | "leads"
+  | "contacts"
+  | "opportunities"
+  | "vendors"
+  | "projects"
   | "proforma"
   | "credit_note"
   | "challan"
@@ -83,6 +88,9 @@ const TITLES: Record<Screen, string> = {
   stock_serials: "Stock & Serials",
   audit_log: "Audit Log",
   settings: "Settings",
+  leads: "Leads",
+  contacts: "Contacts",
+  opportunities: "Opportunities",
 };
 
 export default function Home() {
@@ -322,7 +330,45 @@ export default function Home() {
             />
           )}
           {screen === "customers" && <Customers />}
-
+          {screen === "leads" && (
+            <ComingSoon
+              title="Leads"
+              icon="📇"
+              description="Track inbound enquiries before they become customers — capture, qualify, and convert leads into opportunities."
+              bullets={[
+                "Capture leads from calls, email, and walk-ins",
+                "Qualification status (New / Contacted / Qualified / Lost)",
+                "Convert a qualified lead into a Contact + Opportunity",
+                "Source tracking (referral, website, exhibition, etc.)",
+              ]}
+            />
+          )}
+          {screen === "contacts" && (
+            <ComingSoon
+              title="Contacts"
+              icon="📇"
+              description="Individual people at your customer and prospect companies — separate from the company-level Customer record."
+              bullets={[
+                "Multiple contacts per customer/company",
+                "Role/designation, direct phone & email",
+                "Activity history — calls, emails, site visits",
+                "Link to Customers, Leads, and Opportunities",
+              ]}
+            />
+          )}
+          {screen === "opportunities" && (
+            <ComingSoon
+              title="Opportunities"
+              icon="🎯"
+              description="Active sales deals in progress — from first quote to won/lost, with expected value and stage tracking."
+              bullets={[
+                "Pipeline stages (Qualification → Quote → Negotiation → Won/Lost)",
+                "Expected value and probability-weighted forecast",
+                "Link quotations and invoices to an opportunity",
+                "Win/loss reporting by product, customer, and rep",
+              ]}
+            />
+          )}
           {/* ── New CRM screens ── */}
           {screen === "vendors" && (
             <ComingSoon
