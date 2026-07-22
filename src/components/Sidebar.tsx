@@ -3,104 +3,121 @@ import { useState } from "react";
 import type { Screen } from "@/app/page";
 import { Icon, IconName } from "@/components/icons";
 
-interface NavItem {
+// ────────────────────────────────────────────────────────────────────────
+// Two kinds of sidebar rows, matching the reference layout:
+//   - "leaf"    → a single item with its own icon, no children, no
+//                 chevron. When active it gets a solid filled pill
+//                 (like "Home" in the reference screenshot).
+//   - "section" → a labelled group with an icon + chevron. Expanding it
+//                 reveals plain-text children (no icons on children —
+//                 that's deliberate, matches the reference). When the
+//                 section contains the active screen, the header row
+//                 gets a translucent pill + border (like "Sales" in the
+//                 reference, shown expanded and highlighted).
+// ────────────────────────────────────────────────────────────────────────
+interface LeafItem {
+  kind: "leaf";
   id: Screen;
   label: string;
   icon: IconName;
-  badge?: string;
 }
-
-interface NavSection {
+interface SectionItem {
+  kind: "section";
   key: string;
   label: string;
   icon: IconName;
-  items: NavItem[];
+  children: Array<{ id: Screen; label: string; badge?: "IN" | "OUT" }>;
 }
+type NavRow = LeafItem | SectionItem;
 
-const NAV: NavSection[] = [
+const NAV: NavRow[] = [
+  { kind: "leaf", id: "dashboard", label: "Home", icon: "dashboard" },
+  { kind: "leaf", id: "additem", label: "Items", icon: "box" },
+
   {
-    key: "overview",
-    label: "Overview",
-    icon: "dashboard",
-    items: [{ id: "dashboard", label: "Dashboard", icon: "dashboard" }],
-  },
-  {
+    kind: "section",
     key: "crm",
     label: "CRM",
     icon: "users",
-    items: [
-      { id: "customers", label: "Customers", icon: "users" },
-      { id: "vendors", label: "Vendors", icon: "factory" },
-      { id: "projects", label: "Projects", icon: "folder" },
+    children: [
+      { id: "leads", label: "Leads" },
+      { id: "contacts", label: "Contacts" },
+      { id: "customers", label: "Customers" },
+      { id: "opportunities", label: "Opportunities" },
+      { id: "vendors", label: "Vendors" },
+      { id: "projects", label: "Projects" },
     ],
   },
   {
+    kind: "section",
+    key: "inventory",
+    label: "Inventory",
+    icon: "list",
+    children: [
+      { id: "stock", label: "View Stock" },
+      { id: "transfers", label: "Stock Transfer" },
+      { id: "stock_serials", label: "Stock & Serials" },
+    ],
+  },
+  {
+    kind: "section",
     key: "sales",
     label: "Sales",
     icon: "receipt",
-    items: [
-      { id: "quotation", label: "Quotation", icon: "file" },
-      { id: "proforma", label: "Proforma Invoice", icon: "clipboard" },
-      {
-        id: "sale",
-        label: "New Sale / Dispatch",
-        icon: "arrow-up",
-        badge: "STOCK OUT",
-      },
-      { id: "invoices", label: "All Invoices", icon: "receipt" },
-      { id: "credit_note", label: "Credit Note", icon: "undo" },
-      { id: "challan", label: "Delivery Challan", icon: "truck" },
-      { id: "packing_list", label: "Packing List", icon: "box" },
-      { id: "eway_bill", label: "E-Way Bill", icon: "road" },
+    children: [
+      { id: "quotation", label: "Quotation" },
+      { id: "proforma", label: "Proforma Invoice" },
+      { id: "sale", label: "New Sale / Dispatch", badge: "OUT" },
+      { id: "invoices", label: "All Invoices" },
+      { id: "challan", label: "Delivery Challan" },
+      { id: "packing_list", label: "Packing List" },
+      { id: "credit_note", label: "Credit Note" },
     ],
   },
   {
-    key: "inventory",
-    label: "Inventory",
+    kind: "section",
+    key: "purchases",
+    label: "Purchases",
     icon: "box",
-    items: [
-      {
-        id: "purchase",
-        label: "New Purchase",
-        icon: "arrow-down",
-        badge: "STOCK IN",
-      },
-      { id: "stock", label: "View Stock", icon: "list" },
-      { id: "transfers", label: "Stock Transfer", icon: "swap" },
-      { id: "debit_note", label: "Debit Note", icon: "note" },
+    children: [
+      { id: "purchase", label: "New Purchase", badge: "IN" },
+      { id: "debit_note", label: "Debit Note" },
     ],
   },
   {
+    kind: "section",
     key: "expenses",
     label: "Expenses",
     icon: "wallet",
-    items: [
-      { id: "expenses", label: "Company Expenses", icon: "wallet" },
-      { id: "proj_expenses", label: "Project Expenses", icon: "clipboard" },
+    children: [
+      { id: "expenses", label: "Company Expenses" },
+      { id: "proj_expenses", label: "Project Expenses" },
     ],
   },
   {
-    key: "people",
-    label: "People",
-    icon: "user",
-    items: [{ id: "employees", label: "Employees", icon: "user" }],
-  },
-  {
+    kind: "section",
     key: "admin",
     label: "Admin",
     icon: "settings",
-    items: [
-      { id: "stock_serials", label: "Stock & Serials", icon: "hash" },
-      { id: "bin", label: "Bin", icon: "trash" },
-      { id: "audit_log", label: "Audit Log", icon: "search" },
-      { id: "ledger", label: "Ledger", icon: "book" },
-      { id: "downloads", label: "Downloads", icon: "download" },
-      { id: "settings", label: "Settings", icon: "settings" },
+    children: [
+      { id: "employees", label: "Employees" },
+      { id: "ledger", label: "Ledger" },
+      { id: "downloads", label: "Downloads" },
+      { id: "bin", label: "Bin" },
+      { id: "audit_log", label: "Audit Log" },
+      { id: "settings", label: "Settings" },
     ],
   },
 ];
 
-const DEFAULT_OPEN = new Set(["overview", "sales", "inventory"]);
+const sectionOf = (screen: Screen): string | null => {
+  for (const row of NAV) {
+    if (row.kind === "section" && row.children.some((c) => c.id === screen)) {
+      return row.key;
+    }
+  }
+  return null;
+};
 
 export default function Sidebar({
   current,
@@ -109,12 +126,10 @@ export default function Sidebar({
   current: Screen;
   onChange: (s: Screen) => void;
 }) {
-  const currentSection =
-    NAV.find((s) => s.items.some((i) => i.id === current))?.key ?? "";
-
-  const [open, setOpen] = useState<Set<string>>(
-    () => new Set([...DEFAULT_OPEN, currentSection]),
-  );
+  const [open, setOpen] = useState<Set<string>>(() => {
+    const active = sectionOf(current);
+    return new Set(active ? ["sales", active] : ["sales"]);
+  });
 
   const toggle = (key: string) => {
     setOpen((prev) => {
@@ -125,7 +140,7 @@ export default function Sidebar({
     });
   };
 
-  const handleItemClick = (id: Screen, sectionKey: string) => {
+  const handleChildClick = (id: Screen, sectionKey: string) => {
     setOpen((prev) => new Set([...prev, sectionKey]));
     onChange(id);
   };
@@ -133,7 +148,7 @@ export default function Sidebar({
   return (
     <div
       style={{
-        width: 210,
+        width: 216,
         background: "var(--bg-card)",
         borderRight: "1px solid var(--border)",
         display: "flex",
@@ -165,45 +180,85 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", padding: "6px 0 12px" }}>
-        {NAV.map((section) => {
-          const isOpen = open.has(section.key);
-          const hasActive = section.items.some((i) => i.id === current);
-
-          return (
-            <div key={section.key}>
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "8px 8px 12px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+        }}
+      >
+        {NAV.map((row) => {
+          if (row.kind === "leaf") {
+            const isActive = row.id === current;
+            return (
               <div
-                onClick={() => toggle(section.key)}
+                key={row.id}
+                onClick={() => onChange(row.id)}
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  justifyContent: "space-between",
-                  padding: "8px 12px 5px",
+                  gap: 9,
+                  padding: "8px 10px",
+                  borderRadius: 8,
                   cursor: "pointer",
-                  userSelect: "none",
-                  marginTop: 2,
+                  fontSize: 13,
+                  fontWeight: isActive ? 600 : 400,
+                  color: isActive ? "#fff" : "var(--text-dim)",
+                  background: isActive ? "var(--accent)" : "transparent",
+                  transition: "background 0.1s",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isActive)
+                    e.currentTarget.style.background = "rgba(255,255,255,0.05)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!isActive)
+                    e.currentTarget.style.background = "transparent";
                 }}
               >
-                <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                  <Icon
-                    name={section.icon}
-                    size={13}
-                    style={{
-                      color: hasActive ? "var(--accent)" : "var(--text-muted)",
-                    }}
-                  />
-                  <span
-                    style={{
-                      fontSize: 10,
-                      fontWeight: 600,
-                      color: hasActive ? "var(--accent)" : "var(--text-muted)",
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    {section.label}
-                  </span>
-                </div>
+                <Icon name={row.icon} size={15} />
+                {row.label}
+              </div>
+            );
+          }
+
+          const isOpen = open.has(row.key);
+          const hasActive = row.children.some((c) => c.id === current);
+
+          return (
+            <div key={row.key}>
+              <div
+                onClick={() => toggle(row.key)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  cursor: "pointer",
+                  fontSize: 13,
+                  fontWeight: hasActive ? 600 : 400,
+                  color: hasActive ? "var(--accent)" : "var(--text-dim)",
+                  background: hasActive
+                    ? "rgba(59,130,246,0.12)"
+                    : "transparent",
+                  border: hasActive
+                    ? "1px solid rgba(59,130,246,0.35)"
+                    : "1px solid transparent",
+                  transition: "background 0.1s",
+                }}
+                onMouseEnter={(e) => {
+                  if (!hasActive)
+                    e.currentTarget.style.background = "rgba(255,255,255,0.05)";
+                }}
+                onMouseLeave={(e) => {
+                  if (!hasActive)
+                    e.currentTarget.style.background = "transparent";
+                }}
+              >
                 <Icon
                   name="chevron-right"
                   size={11}
@@ -211,102 +266,90 @@ export default function Sidebar({
                     color: "var(--text-muted)",
                     transform: isOpen ? "rotate(90deg)" : "rotate(0deg)",
                     transition: "transform 0.15s ease",
+                    flexShrink: 0,
                   }}
                 />
+                <Icon name={row.icon} size={15} />
+                <span style={{ flex: 1 }}>{row.label}</span>
               </div>
 
               {isOpen && (
-                <div style={{ paddingBottom: 2 }}>
-                  {section.items.map((item) => {
-                    const isActive = item.id === current;
+                <div
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 1,
+                    marginTop: 2,
+                    marginBottom: 4,
+                  }}
+                >
+                  {row.children.map((child) => {
+                    const isActive = child.id === current;
                     return (
                       <div
-                        key={item.id}
-                        onClick={() => handleItemClick(item.id, section.key)}
+                        key={child.id}
+                        onClick={() => handleChildClick(child.id, row.key)}
                         style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          padding: "6px 10px 6px 26px",
-                          fontSize: 12,
+                          padding: "7px 10px 7px 36px",
+                          borderRadius: 7,
                           cursor: "pointer",
-                          color: isActive ? "var(--accent)" : "var(--text-dim)",
+                          fontSize: 12.5,
+                          color: isActive
+                            ? "var(--accent)"
+                            : "var(--text-muted)",
+                          fontWeight: isActive ? 600 : 400,
                           background: isActive
                             ? "rgba(59,130,246,0.1)"
                             : "transparent",
-                          fontWeight: isActive ? 500 : 400,
-                          borderLeft: isActive
-                            ? "2px solid var(--accent)"
-                            : "2px solid transparent",
-                          transition: "background 0.1s",
-                          borderRadius: "0 6px 6px 0",
-                          marginRight: 6,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          transition: "background 0.1s, color 0.1s",
                         }}
                         onMouseEnter={(e) => {
-                          if (!isActive)
-                            (
-                              e.currentTarget as HTMLDivElement
-                            ).style.background = "rgba(255,255,255,0.04)";
+                          if (!isActive) {
+                            e.currentTarget.style.background =
+                              "rgba(255,255,255,0.04)";
+                            e.currentTarget.style.color = "var(--text)";
+                          }
                         }}
                         onMouseLeave={(e) => {
-                          if (!isActive)
-                            (
-                              e.currentTarget as HTMLDivElement
-                            ).style.background = "transparent";
+                          if (!isActive) {
+                            e.currentTarget.style.background = "transparent";
+                            e.currentTarget.style.color = "var(--text-muted)";
+                          }
                         }}
                       >
-                        <span
-                          style={{
-                            width: 16,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            flexShrink: 0,
-                          }}
-                        >
-                          <Icon name={item.icon} size={14} />
-                        </span>
                         <span
                           style={{
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                             whiteSpace: "nowrap",
-                            flex: 1,
                           }}
                         >
-                          {item.label}
+                          {child.label}
                         </span>
-                        {item.badge && (
+                        {child.badge && (
                           <span
                             style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: 3,
                               fontSize: 8,
                               fontWeight: 700,
                               padding: "1px 5px",
                               borderRadius: 99,
                               flexShrink: 0,
                               background:
-                                item.badge === "STOCK IN"
+                                child.badge === "IN"
                                   ? "rgba(34,197,94,0.15)"
                                   : "rgba(239,68,68,0.15)",
                               color:
-                                item.badge === "STOCK IN"
+                                child.badge === "IN"
                                   ? "var(--accent-green)"
                                   : "var(--accent-red)",
                               letterSpacing: "0.03em",
                             }}
                           >
-                            <Icon
-                              name={
-                                item.badge === "STOCK IN"
-                                  ? "arrow-down"
-                                  : "arrow-up"
-                              }
-                              size={8}
-                            />
-                            {item.badge}
+                            {child.badge}
                           </span>
                         )}
                       </div>

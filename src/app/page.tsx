@@ -19,6 +19,7 @@ import Bin from "@/components/Bin";
 import StockSerials from "@/components/StockSerials";
 import Settings from "@/components/Settings";
 import Expenses from "@/components/Expenses";
+import Items from "@/components/Items";
 export type Screen =
   // existing
   | "dashboard"
@@ -307,12 +308,7 @@ export default function Home() {
             />
           )}
           {screen === "additem" && (
-            <AddItem
-              onSuccess={() => {
-                refresh();
-                setScreen("stock");
-              }}
-            />
+            <Items products={products} onChanged={refresh} />
           )}
           {screen === "ledger" && (
             <Ledger sales={sales} purchases={purchases} />
