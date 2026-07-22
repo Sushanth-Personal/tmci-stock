@@ -1,8 +1,17 @@
 // src/app/api/stock/route.ts
 // Reads from lots table — single source of truth
-// Returns one row per model (kochiStock + bangaloreStock as separate fields)
-// FIX: model matching is now trimmed + lowercased on BOTH sides to avoid
-// silent join misses from stray whitespace in either table.
+// Returns ONE ROW PER MODEL (kochiStock + bangaloreStock as separate
+// fields on that row) — there is no per-location row, `location` on the
+// response is always "All". Any caller that filters `stock.filter(s =>
+// s.location === "Kochi")` will silently match nothing — use the
+// kochiStock/bangaloreStock/kochiValue/bangaloreValue fields directly
+// instead (Dashboard.tsx was fixed to do this; StockView.tsx already did).
+//
+// FIX (this revision): now also returns kochiValue/bangaloreValue —
+// previously only the combined stockValue was exposed, even though the
+// server already computed the per-location split internally. That
+// omission is what made Dashboard.tsx's per-location value cards show
+// ₹0 regardless of actual stock.
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -42,7 +51,6 @@ export async function GET() {
     const lots = lotsRes.data ?? [];
     const products = productsRes.data ?? [];
 
-    // Product lookup — normalised key
     const productByModel = new Map(
       products.map((p: any) => [normModel(p.model), p]),
     );
@@ -69,7 +77,7 @@ export async function GET() {
 
       if (!grouped.has(key)) {
         grouped.set(key, {
-          model: String(l.model ?? "").trim(), // keep original display casing
+          model: String(l.model ?? "").trim(),
           kochiQty: 0,
           kochiValue: 0,
           bloreQty: 0,
@@ -116,12 +124,12 @@ export async function GET() {
           currentStock: totalQty,
           kochiStock: g.kochiQty,
           bangaloreStock: g.bloreQty,
+          kochiValue: g.kochiValue,
+          bangaloreValue: g.bloreValue,
           listPrice: prod?.list_price ?? 0,
           costPrice,
           stockValue: totalVal,
           location: "All",
-          // Debug flag — true if no product match was found at all.
-          // Safe to ignore in UI, but useful in browser devtools if this happens again.
           _unmatched: !prod,
         };
       });

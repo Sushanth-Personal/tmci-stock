@@ -14,6 +14,32 @@
   --accent-green: #22c55e;
   --accent-amber: #f59e0b;
   --accent-red: #ef4444;
+
+  /* RGB triplets — for custom-opacity rgba(var(--accent-rgb), 0.2) etc.
+     Kept in sync with src/lib/theme.ts's "dark" theme, which is the
+     single source of truth these values are derived from. */
+  --accent-rgb: 59, 130, 246;
+  --accent-green-rgb: 34, 197, 94;
+  --accent-amber-rgb: 245, 158, 11;
+  --accent-red-rgb: 239, 68, 68;
+
+  /* Pre-mixed translucent backgrounds — use these instead of hardcoding
+     rgba(59,130,246,0.1) / rgba(239,68,68,0.08) / etc. inline in
+     components. Same opacities already used throughout the app, so
+     swapping an existing literal for the matching var below is a
+     drop-in change. */
+  --accent-bg-subtle: rgba(59, 130, 246, 0.08);
+  --accent-bg: rgba(59, 130, 246, 0.12);
+  --accent-border: rgba(59, 130, 246, 0.35);
+  --accent-green-bg-subtle: rgba(34, 197, 94, 0.08);
+  --accent-green-bg: rgba(34, 197, 94, 0.12);
+  --accent-green-border: rgba(34, 197, 94, 0.3);
+  --accent-amber-bg-subtle: rgba(245, 158, 11, 0.08);
+  --accent-amber-bg: rgba(245, 158, 11, 0.12);
+  --accent-amber-border: rgba(245, 158, 11, 0.3);
+  --accent-red-bg-subtle: rgba(239, 68, 68, 0.08);
+  --accent-red-bg: rgba(239, 68, 68, 0.12);
+  --accent-red-border: rgba(239, 68, 68, 0.3);
 }
 
 * { box-sizing: border-box; }

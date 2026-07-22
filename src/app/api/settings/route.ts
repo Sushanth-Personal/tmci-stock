@@ -1,8 +1,9 @@
 // src/app/api/settings/route.ts
 //
 // Single-row settings table — company profile, bank details, invoice
-// defaults, and stock defaults. Logo is stored as a data: URI directly in
-// the DB (no Supabase Storage bucket needed for one small image).
+// defaults, stock defaults, and (new) the active app theme. Logo is
+// stored as a data: URI directly in the DB (no Supabase Storage bucket
+// needed for one small image).
 
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
@@ -36,6 +37,7 @@ const EDITABLE_FIELDS = [
   "default_gst_rate",
   "low_stock_threshold",
   "invoice_prefix",
+  "theme",
 ];
 
 export async function GET() {
@@ -60,7 +62,10 @@ export async function PATCH(req: Request) {
 
     if (body.logo_url && body.logo_url.length > 400_000) {
       return NextResponse.json(
-        { error: "Logo image is too large — please use a smaller file (under ~250KB)." },
+        {
+          error:
+            "Logo image is too large — please use a smaller file (under ~250KB).",
+        },
         { status: 400 },
       );
     }

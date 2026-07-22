@@ -1,13 +1,14 @@
 "use client";
 // src/components/Settings.tsx
 //
-// Company profile, branches/locations, bank details, and operational
-// defaults (invoice GST rate, low-stock threshold) — all editable and
-// backing the rest of the app (InvoicePaper.tsx reads company profile +
-// bank details from here; RecordSale/RecordPurchase/Dashboard can read
-// default_gst_rate / low_stock_threshold going forward).
+// Company profile, branches/locations, bank details, appearance/theme,
+// and operational defaults (invoice GST rate, low-stock threshold) — all
+// editable and backing the rest of the app (InvoicePaper.tsx reads
+// company profile + bank details from here; theme is read by
+// layout.tsx/ThemeProvider.tsx on every page load).
 
 import { useState, useEffect } from "react";
+import { THEMES, applyTheme } from "@/lib/theme";
 
 interface CompanySettings {
   logo_url: string | null;
@@ -30,6 +31,7 @@ interface CompanySettings {
   default_gst_rate: number;
   low_stock_threshold: number;
   invoice_prefix: string;
+  theme: string;
 }
 
 interface Location {
@@ -53,7 +55,10 @@ const FG = ({ label, children, note }: any) => (
     >
       {label}
       {note && (
-        <span style={{ color: "var(--text-muted)", opacity: 0.7 }}> — {note}</span>
+        <span style={{ color: "var(--text-muted)", opacity: 0.7 }}>
+          {" "}
+          — {note}
+        </span>
       )}
     </label>
     {children}
@@ -105,7 +110,10 @@ export default function Settings() {
       .then((r) => r.json())
       .then((d) => {
         if (d.settings) {
-          setSettings(d.settings);
+          // Defensive fallback — every row already has a theme (DB column
+          // defaults to 'dark'), but this keeps the picker from crashing
+          // if that's ever missing on some other environment.
+          setSettings({ theme: "dark", ...d.settings });
           setLogoPreview(d.settings.logo_url ?? null);
         }
       })
@@ -190,7 +198,10 @@ export default function Settings() {
       const res = await fetch("/api/locations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newLocName.trim(), state: newLocState.trim() }),
+        body: JSON.stringify({
+          name: newLocName.trim(),
+          state: newLocState.trim(),
+        }),
       });
       const d = await res.json();
       if (!res.ok) {
@@ -207,7 +218,11 @@ export default function Settings() {
     }
   };
 
-  const updateLocationField = (id: number, field: keyof Location, value: any) => {
+  const updateLocationField = (
+    id: number,
+    field: keyof Location,
+    value: any,
+  ) => {
     setLocations((prev) =>
       prev.map((l) => (l.id === id ? { ...l, [field]: value } : l)),
     );
@@ -277,13 +292,26 @@ export default function Settings() {
                 style={{ width: "100%", height: "100%", objectFit: "contain" }}
               />
             ) : (
-              <span style={{ fontSize: 9, color: "var(--text-muted)" }}>No logo</span>
+              <span style={{ fontSize: 9, color: "var(--text-muted)" }}>
+                No logo
+              </span>
             )}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, justifyContent: "center" }}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              justifyContent: "center",
+            }}
+          >
             <label
               className="btn-ghost"
-              style={{ fontSize: 11, cursor: "pointer", display: "inline-block" }}
+              style={{
+                fontSize: 11,
+                cursor: "pointer",
+                display: "inline-block",
+              }}
             >
               {logoPreview ? "Change logo" : "Upload logo"}
               <input
@@ -308,7 +336,9 @@ export default function Settings() {
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div
+          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+        >
           <FG label="Company name">
             <input
               value={settings.company_name}
@@ -335,13 +365,22 @@ export default function Settings() {
             />
           </FG>
           <FG label="Phone">
-            <input value={settings.phone} onChange={(e) => set({ phone: e.target.value })} />
+            <input
+              value={settings.phone}
+              onChange={(e) => set({ phone: e.target.value })}
+            />
           </FG>
           <FG label="Email">
-            <input value={settings.email} onChange={(e) => set({ email: e.target.value })} />
+            <input
+              value={settings.email}
+              onChange={(e) => set({ email: e.target.value })}
+            />
           </FG>
           <FG label="Website">
-            <input value={settings.website} onChange={(e) => set({ website: e.target.value })} />
+            <input
+              value={settings.website}
+              onChange={(e) => set({ website: e.target.value })}
+            />
           </FG>
         </div>
 
@@ -373,6 +412,91 @@ export default function Settings() {
         </div>
       </SectionCard>
 
+      {/* Appearance / theme */}
+      <SectionCard title="Appearance">
+        <div
+          style={{
+            fontSize: 11,
+            color: "var(--text-muted)",
+            marginBottom: 12,
+            lineHeight: 1.6,
+          }}
+        >
+          This applies to everyone using TMCI Desk — it's a company-wide
+          setting, not just your browser. Click a theme to preview it instantly;
+          click "Save settings" below to make it permanent.
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))",
+            gap: 10,
+          }}
+        >
+          {Object.values(THEMES).map((t) => {
+            const active = settings.theme === t.key;
+            return (
+              <div
+                key={t.key}
+                onClick={() => {
+                  set({ theme: t.key });
+                  applyTheme(t.key); // live preview, instantly
+                }}
+                style={{
+                  border: active
+                    ? "2px solid var(--accent)"
+                    : "1px solid var(--border)",
+                  borderRadius: 10,
+                  padding: 12,
+                  cursor: "pointer",
+                  background: "var(--bg-input)",
+                }}
+              >
+                <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                  <div
+                    style={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: "50%",
+                      background: t.previewBg,
+                      border: "1px solid rgba(255,255,255,0.15)",
+                    }}
+                  />
+                  <div
+                    style={{
+                      width: 22,
+                      height: 22,
+                      borderRadius: "50%",
+                      background: t.previewAccent,
+                    }}
+                  />
+                </div>
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: active ? 600 : 500,
+                    color: active ? "var(--accent)" : "var(--text)",
+                  }}
+                >
+                  {t.label}
+                </div>
+                {active && (
+                  <div
+                    style={{
+                      fontSize: 10,
+                      color: "var(--accent)",
+                      marginTop: 2,
+                    }}
+                  >
+                    ✓ Active
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </SectionCard>
+
       {/* Locations / branches */}
       <SectionCard title="Locations (warehouses / branches)">
         <div
@@ -385,14 +509,16 @@ export default function Settings() {
         >
           Stock is tracked per location below. Each is a warehouse under the
           same company — give a location its own GSTIN only if it's a real,
-          separately-registered GST branch for that state; otherwise leave
-          it blank and invoices from that location use the main company
-          GSTIN above (with IGST for out-of-state customers, CGST+SGST for
-          in-state — handled automatically).
+          separately-registered GST branch for that state; otherwise leave it
+          blank and invoices from that location use the main company GSTIN above
+          (with IGST for out-of-state customers, CGST+SGST for in-state —
+          handled automatically).
         </div>
 
         {locLoading ? (
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading…</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            Loading…
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {locations.map((loc) => (
@@ -411,14 +537,18 @@ export default function Settings() {
                 <FG label="Name">
                   <input
                     value={loc.name}
-                    onChange={(e) => updateLocationField(loc.id, "name", e.target.value)}
+                    onChange={(e) =>
+                      updateLocationField(loc.id, "name", e.target.value)
+                    }
                     onBlur={() => saveLocation(loc)}
                   />
                 </FG>
                 <FG label="State">
                   <input
                     value={loc.state ?? ""}
-                    onChange={(e) => updateLocationField(loc.id, "state", e.target.value)}
+                    onChange={(e) =>
+                      updateLocationField(loc.id, "state", e.target.value)
+                    }
                     onBlur={() => saveLocation(loc)}
                   />
                 </FG>
@@ -426,7 +556,11 @@ export default function Settings() {
                   <input
                     value={loc.gstin ?? ""}
                     onChange={(e) =>
-                      updateLocationField(loc.id, "gstin", e.target.value.toUpperCase())
+                      updateLocationField(
+                        loc.id,
+                        "gstin",
+                        e.target.value.toUpperCase(),
+                      )
                     }
                     onBlur={() => saveLocation(loc)}
                     placeholder="blank = uses main GSTIN"
@@ -447,7 +581,11 @@ export default function Settings() {
                     type="checkbox"
                     checked={loc.is_active}
                     onChange={(e) => {
-                      updateLocationField(loc.id, "is_active", e.target.checked);
+                      updateLocationField(
+                        loc.id,
+                        "is_active",
+                        e.target.checked,
+                      );
                       saveLocation({ ...loc, is_active: e.target.checked });
                     }}
                     style={{ width: "auto" }}
@@ -480,12 +618,18 @@ export default function Settings() {
             onChange={(e) => setNewLocState(e.target.value)}
             style={{ width: 160 }}
           />
-          <button className="btn-ghost" onClick={addLocation} disabled={addingLoc}>
+          <button
+            className="btn-ghost"
+            onClick={addLocation}
+            disabled={addingLoc}
+          >
             {addingLoc ? "Adding…" : "+ Add location"}
           </button>
         </div>
         {locError && (
-          <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent-red)" }}>
+          <div
+            style={{ marginTop: 8, fontSize: 11, color: "var(--accent-red)" }}
+          >
             {locError}
           </div>
         )}
@@ -493,7 +637,9 @@ export default function Settings() {
 
       {/* Bank details */}
       <SectionCard title="Bank details (shown on invoices)">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div
+          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+        >
           <FG label="Bank name">
             <input
               value={settings.bank_name}
@@ -523,8 +669,13 @@ export default function Settings() {
 
       {/* Invoice & stock defaults */}
       <SectionCard title="Invoice & stock defaults">
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <FG label="Default payment terms" note="e.g. 'Due on Receipt', 'Net 30'">
+        <div
+          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}
+        >
+          <FG
+            label="Default payment terms"
+            note="e.g. 'Due on Receipt', 'Net 30'"
+          >
             <input
               value={settings.default_terms}
               onChange={(e) => set({ default_terms: e.target.value })}
@@ -534,21 +685,31 @@ export default function Settings() {
             <input
               type="number"
               value={settings.default_gst_rate}
-              onChange={(e) => set({ default_gst_rate: Number(e.target.value) || 0 })}
+              onChange={(e) =>
+                set({ default_gst_rate: Number(e.target.value) || 0 })
+              }
             />
           </FG>
-          <FG label="Invoice number prefix" note="optional, e.g. '2026-2027-KL-'">
+          <FG
+            label="Invoice number prefix"
+            note="optional, e.g. '2026-2027-KL-'"
+          >
             <input
               value={settings.invoice_prefix}
               onChange={(e) => set({ invoice_prefix: e.target.value })}
             />
           </FG>
-          <FG label="Low stock threshold" note="flag a model when total stock ≤ this">
+          <FG
+            label="Low stock threshold"
+            note="flag a model when total stock ≤ this"
+          >
             <input
               type="number"
               min={0}
               value={settings.low_stock_threshold}
-              onChange={(e) => set({ low_stock_threshold: Number(e.target.value) || 0 })}
+              onChange={(e) =>
+                set({ low_stock_threshold: Number(e.target.value) || 0 })
+              }
             />
           </FG>
         </div>
